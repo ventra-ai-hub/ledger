@@ -83,6 +83,46 @@
     }
     .dropdown-menu { animation: dropdownIn 180ms cubic-bezier(0.22, 1, 0.36, 1); }
 
+    /* ============ Custom dropdown (themed, no native chrome) ============ */
+    .dd-trigger { color: var(--text); background-color: var(--surface); }
+    .dd-trigger:hover { background-color: var(--surface-2); }
+    .dd-trigger:focus-visible { outline: none; box-shadow: var(--shadow-field), 0 0 0 2px var(--accent-glow); }
+    .dd-menu { border: 1px solid var(--border-strong); animation: dropdownIn 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+    .dd-option { color: var(--text); background: transparent; }
+    .dd-option:hover,
+    .dd-option:focus { outline: none; background-color: var(--surface-2); }
+    .dd-option.dd-active { background-color: var(--surface-2); }
+    .dd-option:focus-visible { box-shadow: inset 2px 0 0 var(--accent); }
+    .dd-check { color: var(--accent); }
+    [data-dropdown][data-open="true"] .dd-chev { transform: rotate(180deg); }
+
+    /* ============ Segmented toggle (restrained active state) ============ */
+    .seg-toggle {
+      background-color: var(--surface);
+      padding: 3px;
+      border-radius: 14px;
+      display: inline-flex;
+      gap: 2px;
+      box-shadow: var(--shadow-field);
+    }
+    .seg-toggle button {
+      padding: 6px 14px;
+      font: 500 12px/1 'DM Sans', system-ui, sans-serif;
+      letter-spacing: 0.02em;
+      border-radius: 11px;
+      background: transparent;
+      color: var(--text-muted);
+      transition: background-color 140ms, color 140ms, box-shadow 140ms;
+      cursor: pointer;
+    }
+    .seg-toggle button:hover { color: var(--text); }
+    .seg-toggle button.active {
+      background-color: var(--surface-2);
+      color: var(--accent);
+      box-shadow: inset 0 0 0 1px rgba(200,184,239,0.45);
+    }
+    .seg-toggle button:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-glow); }
+
     @keyframes toastIn {
       from { opacity: 0; transform: translateY(12px); }
       to   { opacity: 1; transform: translateY(0); }
@@ -448,7 +488,6 @@
       currentMonth: todayISO().slice(0, 7),
       currentFY: currentFYNum(),
       editingId: null,
-      openDropdown: null,            // id of currently-open custom dropdown
       saving: false,
       filterExpense: 'all',          // 'all' or period key
       filterIncome: 'all',
@@ -602,33 +641,49 @@
         class="inline-flex items-center justify-center gap-2 rounded-2xl font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed ${sizes[size]} ${variants[variant]} ${className}">${children}</button>`;
     }
 
-    // Custom dropdown. `options` = [{value, label}]. `id` identifies this dropdown instance
-    // so outside-click and keyboard handlers know which one is open. `action` is dispatched
-    // with data-value=<chosen> on selection.
-    function dropdown({ id, value, options, placeholder = 'Select', className = '', align = 'left', action }) {
+    // Custom dropdown — themed, DOM-based open/close (no re-render needed so
+    // form drafts survive an option pick). Parameters:
+    //   id        — unique dropdown identifier (used by open/close handlers)
+    //   value     — current value (matched against options[].value)
+    //   options   — [{ value, label }]
+    //   field     — optional: name for a hidden <input> so form readers
+    //               (readField) can pick up the chosen value
+    //   action    — optional: side-effect action emitted on selection
+    //               (e.g. 'pick-month', 'set-filter'), dispatched through
+    //               the action table with the clicked option as `el`
+    //   align     — 'left' | 'right'
+    //   placeholder — text shown when no option matches `value`
+    function dropdown({ id, value, options, placeholder = 'Select', className = '', align = 'left', field, action }) {
       const selected = options.find(o => o.value === value);
       const selLabel = selected ? selected.label : placeholder;
-      const open = state.openDropdown === id;
-      const menu = open ? `
-        <div class="dropdown-menu absolute z-50 mt-2 min-w-full bg-white rounded-2xl py-1.5 overflow-hidden ${align === 'right' ? 'right-0' : 'left-0'}"
-          style="${shadowDropdown}">
+      const labelColor = selected ? 'var(--text)' : 'var(--text-faint)';
+      const hidden = field
+        ? `<input type="hidden" data-field="${attr(field)}" value="${attr(value || '')}" />`
+        : '';
+      const menuId = `dd-menu-${attr(id)}`;
+      return `<div data-dropdown="${attr(id)}" data-open="false" data-value="${attr(value || '')}" class="relative ${className}">
+        ${hidden}
+        <button type="button" data-action="dd-toggle" data-dd="${attr(id)}"
+          role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="${menuId}"
+          class="dd-trigger w-full flex items-center justify-between gap-2 px-4 py-2.5 text-sm rounded-2xl transition-colors"
+          style="${shadowField}">
+          <span data-dd-label class="truncate" style="color: ${labelColor};">${esc(selLabel)}</span>
+          ${icon('chevronDown', 14, 'dd-chev transition-transform duration-200')}
+        </button>
+        <div id="${menuId}" data-dd-menu role="listbox" tabindex="-1"
+          class="dd-menu absolute z-50 mt-2 min-w-full rounded-2xl py-1.5 overflow-y-auto ${align === 'right' ? 'right-0' : 'left-0'}"
+          style="display:none; max-height:280px; background-color: var(--surface-raised); ${shadowDropdown}">
           ${options.map(o => {
             const active = o.value === value;
-            return `<button type="button" data-action="${attr(action)}" data-dropdown-id="${attr(id)}" data-value="${attr(o.value)}"
-              class="w-full text-left px-4 py-2.5 text-sm flex items-center justify-between gap-3 transition-colors ${active ? 'bg-stone-50 text-stone-900' : 'text-stone-700 hover:bg-stone-50'}">
+            return `<button type="button" role="option"
+              data-action="dd-select" data-dd="${attr(id)}" data-value="${attr(o.value)}" data-label="${attr(o.label)}"${action ? ` data-emit="${attr(action)}"` : ''}
+              aria-selected="${active}" tabindex="-1"
+              class="dd-option ${active ? 'dd-active' : ''} w-full text-left px-4 py-2.5 text-sm flex items-center justify-between gap-3 transition-colors">
               <span class="whitespace-nowrap">${esc(o.label)}</span>
-              ${active ? icon('check', 14, 'text-stone-900') : ''}
+              <span class="dd-check" style="${active ? '' : 'visibility:hidden;'}">${icon('check', 14)}</span>
             </button>`;
           }).join('')}
-        </div>` : '';
-      return `<div data-dropdown="${attr(id)}" class="relative ${className}">
-        <button type="button" data-action="toggle-dropdown" data-dropdown-id="${attr(id)}"
-          class="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-sm bg-white rounded-2xl hover:bg-stone-50 transition-colors"
-          style="${shadowField}">
-          <span class="${selected ? 'text-stone-900' : 'text-stone-400'}">${esc(selLabel)}</span>
-          ${icon('chevronDown', 15, `text-stone-500 transition-transform duration-200 ${open ? 'rotate-180' : ''}`)}
-        </button>
-        ${menu}
+        </div>
       </div>`;
     }
 
@@ -711,11 +766,10 @@
     function periodSelector() {
       if (!PERIOD_TABS.has(state.tab)) return '';
       const modeToggle = `
-        <div class="inline-flex rounded-2xl p-1 bg-white" style="${shadowField}">
+        <div class="seg-toggle" role="tablist" aria-label="Period mode">
           ${['month','fy'].map(m => {
             const active = state.period === m;
-            return `<button data-action="set-period-mode" data-mode="${m}"
-              class="px-3 py-1.5 text-xs font-medium rounded-xl transition-all ${active ? 'bg-stone-900 text-stone-50' : 'text-stone-600 hover:text-stone-900'}">
+            return `<button data-action="set-period-mode" data-mode="${m}" role="tab" aria-selected="${active}" class="${active ? 'active' : ''}">
               ${m === 'month' ? 'Month' : 'FY'}
             </button>`;
           }).join('')}
@@ -1067,10 +1121,13 @@
           ${isExpense ? `
           <div class="md:col-span-${gstEnabled ? 2 : 3}">
             ${label('Category')}
-            <select data-field="category" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
-              <option value="">—</option>
-              ${EXPENSE_CATEGORIES.map(c => `<option value="${attr(c)}">${esc(c)}</option>`).join('')}
-            </select>
+            ${dropdown({
+              id: 'add-expense-category',
+              value: '',
+              options: [{ value: '', label: '—' }, ...EXPENSE_CATEGORIES.map(c => ({ value: c, label: c }))],
+              field: 'category',
+              placeholder: '—'
+            })}
           </div>` : ''}
           <div class="md:col-span-2">
             ${label('Date')}
@@ -1157,10 +1214,13 @@
         return `<tr data-edit-row="${item.id}" style="background-color:var(--surface-2); border-bottom: 1px solid var(--border);">
           <td class="px-4 md:px-6 py-2.5">${textField({ value: item[nameField] || '', field: nameField })}</td>
           ${isExpense ? `<td class="px-4 md:px-6 py-2.5 hidden md:table-cell">
-            <select data-field="category" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
-              <option value="">—</option>
-              ${EXPENSE_CATEGORIES.map(c => `<option value="${attr(c)}"${item.category === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}
-            </select>
+            ${dropdown({
+              id: `edit-category-${item.id}`,
+              value: item.category || '',
+              options: [{ value: '', label: '—' }, ...EXPENSE_CATEGORIES.map(c => ({ value: c, label: c }))],
+              field: 'category',
+              placeholder: '—'
+            })}
           </td>` : ''}
           <td class="px-4 md:px-6 py-2.5">${textField({ type: 'date', value: item.date, field: 'date' })}</td>
           <td class="px-4 md:px-6 py-2.5">${numberField({ id: `edit-amount-${item.id}`, value: String(item.amount || ''), field: 'amount' })}</td>
@@ -1323,9 +1383,13 @@
           </div>
           <div class="md:col-span-3">
             ${label('Assigned to')}
-            <select data-field="assignedTo" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
-              ${assignOptions.map(o => `<option value="${attr(o.value)}">${esc(o.label)}</option>`).join('')}
-            </select>
+            ${dropdown({
+              id: 'add-uncollected-assigned',
+              value: '',
+              options: assignOptions,
+              field: 'assignedTo',
+              placeholder: '—'
+            })}
           </div>
           <div class="md:col-span-1 flex items-end">
             ${button({ children: icon('plus', 14), action: 'add-uncollected', className: 'w-full' })}
@@ -1473,9 +1537,12 @@
           </div>
           <div class="md:col-span-2">
             ${label('Direction')}
-            <select data-field="direction" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
-              ${directionOptions.map(o => `<option value="${attr(o.value)}">${esc(o.label)}</option>`).join('')}
-            </select>
+            ${dropdown({
+              id: 'add-loan-direction',
+              value: 'out',
+              options: directionOptions,
+              field: 'direction'
+            })}
           </div>
           <div class="md:col-span-1 flex items-end">
             ${button({ children: icon('plus', 14), action: 'add-loan', className: 'w-full' })}
@@ -2203,9 +2270,12 @@
           </div>
           <div class="md:col-span-2">
             ${label('Currency')}
-            <select data-field="currency" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
-              ${CURRENCY_OPTIONS.map(o => `<option value="${attr(o.value)}"${settings.currency === o.value ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
-            </select>
+            ${dropdown({
+              id: 'settings-currency',
+              value: settings.currency,
+              options: CURRENCY_OPTIONS,
+              field: 'currency'
+            })}
           </div>
         </form>
         <div class="mt-5 flex justify-end">
@@ -2380,18 +2450,44 @@
       root.innerHTML = layout(renderer());
     }
 
+    // ============ Dropdown open/close (DOM-driven) ============
+    function closeAllDropdowns(exceptEl) {
+      document.querySelectorAll('[data-dropdown][data-open="true"]').forEach(w => {
+        if (w !== exceptEl) closeDropdown(w);
+      });
+    }
+    function openDropdown(wrap) {
+      wrap.dataset.open = 'true';
+      const menu = wrap.querySelector('[data-dd-menu]');
+      const trigger = wrap.querySelector('.dd-trigger');
+      if (menu) menu.style.display = 'block';
+      if (trigger) trigger.setAttribute('aria-expanded', 'true');
+      const toFocus = wrap.querySelector('[role="option"][aria-selected="true"]') || wrap.querySelector('[role="option"]');
+      if (toFocus) setTimeout(() => toFocus.focus({ preventScroll: true }), 0);
+    }
+    function closeDropdown(wrap) {
+      wrap.dataset.open = 'false';
+      const menu = wrap.querySelector('[data-dd-menu]');
+      const trigger = wrap.querySelector('.dd-trigger');
+      if (menu) menu.style.display = 'none';
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    }
+
     // ============ Event delegation ============
-    // Single click handler dispatches on [data-action].
+    // Single click handler dispatches on [data-action], delegating to `dispatch`
+    // so internal actions (like dd-select) can forward to another handler.
     document.addEventListener('click', (e) => {
       const el = e.target.closest('[data-action]');
       if (!el) return;
-      const action = el.dataset.action;
+      dispatch(el.dataset.action, el);
+    });
 
+    function dispatch(action, el) {
       // Tab navigation
       if (action === 'tab') {
         state.tab = el.dataset.tab;
-        state.openDropdown = null;
         state.editingId = null;
+        closeAllDropdowns();
         window.scrollTo(0, 0);
         return render();
       }
@@ -2399,28 +2495,55 @@
       // Period mode toggle
       if (action === 'set-period-mode') {
         state.period = el.dataset.mode;
-        state.openDropdown = null;
+        closeAllDropdowns();
         return render();
       }
 
-      // Dropdown toggle
-      if (action === 'toggle-dropdown') {
-        const id = el.dataset.dropdownId;
-        state.openDropdown = (state.openDropdown === id) ? null : id;
-        return render();
+      // Dropdown open/close (DOM-driven, no render)
+      if (action === 'dd-toggle') {
+        const id = el.dataset.dd;
+        const wrap = document.querySelector(`[data-dropdown="${CSS.escape(id)}"]`);
+        if (!wrap) return;
+        closeAllDropdowns(wrap);
+        if (wrap.dataset.open === 'true') closeDropdown(wrap);
+        else openDropdown(wrap);
+        return;
       }
 
-      // Period picker selections
-      if (action === 'pick-month') {
-        state.currentMonth = el.dataset.value;
-        state.openDropdown = null;
-        return render();
+      // Dropdown option selection — update DOM + hidden input, then forward
+      // any `data-emit` action (e.g. pick-month, pick-fy, set-filter).
+      if (action === 'dd-select') {
+        const id = el.dataset.dd;
+        const wrap = document.querySelector(`[data-dropdown="${CSS.escape(id)}"]`);
+        const value = el.dataset.value;
+        const labelText = el.dataset.label;
+        if (wrap) {
+          wrap.dataset.value = value;
+          const hidden = wrap.querySelector('input[type="hidden"][data-field]');
+          if (hidden) hidden.value = value;
+          const labelEl = wrap.querySelector('[data-dd-label]');
+          if (labelEl) {
+            labelEl.textContent = labelText;
+            labelEl.style.color = 'var(--text)';
+          }
+          wrap.querySelectorAll('[role="option"]').forEach(opt => {
+            const isSel = opt.dataset.value === value;
+            opt.setAttribute('aria-selected', String(isSel));
+            opt.classList.toggle('dd-active', isSel);
+            const check = opt.querySelector('.dd-check');
+            if (check) check.style.visibility = isSel ? 'visible' : 'hidden';
+          });
+          closeDropdown(wrap);
+          const trigger = wrap.querySelector('.dd-trigger');
+          if (trigger) trigger.focus({ preventScroll: true });
+        }
+        if (el.dataset.emit) dispatch(el.dataset.emit, el);
+        return;
       }
-      if (action === 'pick-fy') {
-        state.currentFY = Number(el.dataset.value);
-        state.openDropdown = null;
-        return render();
-      }
+
+      // Period picker selections (fired via dd-select forwarding)
+      if (action === 'pick-month') { state.currentMonth = el.dataset.value; return render(); }
+      if (action === 'pick-fy')    { state.currentFY = Number(el.dataset.value); return render(); }
 
       // Number field +/– step
       if (action === 'num-step') {
@@ -2442,11 +2565,10 @@
       if (action === 'delete-entry') return actDeleteEntry(el.dataset.kind, el.dataset.id);
 
       if (action === 'set-filter') {
-        const ddid = el.dataset.dropdownId || '';
+        const ddid = el.dataset.dd || '';
         const kind = ddid.replace(/^filter-/, '');
         const key = kind === 'expense' ? 'filterExpense' : 'filterIncome';
         state[key] = el.dataset.value;
-        state.openDropdown = null;
         return render();
       }
 
@@ -2493,6 +2615,68 @@
         if (fi) fi.click();
         return;
       }
+    }
+
+    // ============ Dropdown keyboard navigation ============
+    document.addEventListener('keydown', (e) => {
+      // If a dropdown trigger is focused and closed, Enter/Space/ArrowDown opens it.
+      const trigger = e.target.closest && e.target.closest('.dd-trigger');
+      if (trigger) {
+        const wrap = trigger.closest('[data-dropdown]');
+        const isOpen = wrap && wrap.dataset.open === 'true';
+        if (!isOpen && (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown')) {
+          e.preventDefault();
+          if (wrap) { closeAllDropdowns(wrap); openDropdown(wrap); }
+          return;
+        }
+      }
+
+      // If any dropdown is open, intercept navigation keys.
+      const openDd = document.querySelector('[data-dropdown][data-open="true"]');
+      if (!openDd) return;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeDropdown(openDd);
+        const trig = openDd.querySelector('.dd-trigger');
+        if (trig) trig.focus({ preventScroll: true });
+        return;
+      }
+      if (e.key === 'Tab') {
+        closeDropdown(openDd);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        const opt = document.activeElement && document.activeElement.closest && document.activeElement.closest('[role="option"]');
+        if (opt && openDd.contains(opt)) {
+          e.preventDefault();
+          opt.click();
+          return;
+        }
+      }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const options = Array.from(openDd.querySelectorAll('[role="option"]'));
+        const cur = options.indexOf(document.activeElement);
+        const next = e.key === 'ArrowDown'
+          ? (cur < 0 ? 0 : (cur + 1) % options.length)
+          : (cur <= 0 ? options.length - 1 : cur - 1);
+        options[next] && options[next].focus({ preventScroll: false });
+        return;
+      }
+      if (e.key === 'Home') {
+        e.preventDefault();
+        const first = openDd.querySelector('[role="option"]');
+        first && first.focus({ preventScroll: false });
+        return;
+      }
+      if (e.key === 'End') {
+        e.preventDefault();
+        const all = openDd.querySelectorAll('[role="option"]');
+        const last = all[all.length - 1];
+        last && last.focus({ preventScroll: false });
+        return;
+      }
     });
 
     // File input change handler (CSV + JSON imports)
@@ -2527,9 +2711,8 @@
 
     // Outside-click closes any open custom dropdown
     document.addEventListener('mousedown', (e) => {
-      if (state.openDropdown && !e.target.closest('[data-dropdown]')) {
-        state.openDropdown = null;
-        render();
+      if (!e.target.closest('[data-dropdown]')) {
+        closeAllDropdowns();
       }
     });
 
