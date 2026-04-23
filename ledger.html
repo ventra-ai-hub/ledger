@@ -1821,8 +1821,8 @@
     // Bundle: 7 files (CSVs + 2 PDFs) zipped as ventra-eofy-pack-FY{year}.zip.
     // JSZip + html2pdf are loaded on-demand so the normal app boot stays fast.
 
-    const JSZIP_URL    = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-    const HTML2PDF_URL = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js';
+    const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    const JSPDF_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js';
 
     function loadScriptOnce(url) {
       return new Promise((resolve, reject) => {
@@ -1835,8 +1835,11 @@
         document.head.appendChild(s);
       });
     }
-    async function ensureJSZip()    { if (!window.JSZip)    await loadScriptOnce(JSZIP_URL); return window.JSZip; }
-    async function ensureHtml2Pdf() { if (!window.html2pdf) await loadScriptOnce(HTML2PDF_URL); return window.html2pdf; }
+    async function ensureJSZip() { if (!window.JSZip) await loadScriptOnce(JSZIP_URL); return window.JSZip; }
+    async function ensureJsPDF() {
+      if (!(window.jspdf && window.jspdf.jsPDF)) await loadScriptOnce(JSPDF_URL);
+      return window.jspdf.jsPDF;
+    }
 
     // CSV with UTF-8 BOM so Excel on Windows correctly detects the encoding.
     function toCSVWithBOM(rows, headers) { return '﻿' + toCSV(rows, headers); }
@@ -1895,232 +1898,359 @@
       return m >= 7 ? y + 1 : y;
     }
 
-    // ---- PDF page HTML builders (light-on-white, print-appropriate) ----
-    const PDF_STYLE = `
-      <style>
-        * { box-sizing: border-box; }
-        .pdf-root { font-family: 'DM Sans', Arial, sans-serif; color: #1c1917; background: #fff; padding: 36px 44px; width: 794px; }
-        .pdf-header { border-bottom: 1px solid #e5e1d8; padding-bottom: 18px; margin-bottom: 22px; }
-        .pdf-title { font-family: 'Fraunces', Georgia, serif; font-size: 30px; font-weight: 300; margin: 0 0 6px 0; letter-spacing: -0.01em; }
-        .pdf-sub { color: #7a736b; font-size: 12px; letter-spacing: 0.06em; }
-        h2.pdf-h { font-family: 'Fraunces', Georgia, serif; font-size: 16px; font-weight: 400; margin: 24px 0 10px; color: #1c1917; }
-        .pdf-label { color: #8a8580; font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; font-weight: 500; margin-bottom: 4px; }
-        .pdf-big { font-family: 'JetBrains Mono', Courier, monospace; font-size: 22px; font-weight: 500; color: #1c1917; }
-        .pdf-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 8px 0 4px; }
-        .pdf-tile { border: 1px solid #e5e1d8; border-radius: 10px; padding: 14px 16px; background: #fafaf7; }
-        .pdf-tile.accent { background: #f2ecff; border-color: #ddd3f5; }
-        .pdf-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-        .pdf-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-        .pdf-table th { text-align: left; padding: 6px 4px; border-bottom: 1.5px solid #cfcac0; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: #6a655f; }
-        .pdf-table td { padding: 5px 4px; border-bottom: 1px solid #efece6; color: #1c1917; vertical-align: top; }
-        .pdf-table .num { text-align: right; font-family: 'JetBrains Mono', Courier, monospace; white-space: nowrap; }
-        .pdf-total-row td { border-top: 1.5px solid #cfcac0; border-bottom: none; font-weight: 600; padding-top: 8px; }
-        .pdf-footer { color: #8a8580; font-size: 9px; margin-top: 32px; padding-top: 12px; border-top: 1px solid #efece6; text-align: center; letter-spacing: 0.06em; }
-        .pdf-page-break { page-break-after: always; break-after: page; height: 0; }
-      </style>`;
+    // ---- PDF builders — direct jsPDF text drawing ----
+    // We previously rendered HTML via html2pdf (html2canvas + jsPDF). It shipped
+    // empty content streams in practice (off-screen container height = 0 in
+    // some browsers, so html2canvas snapshot was blank). Direct text drawing
+    // produces vector, searchable, deterministic output.
 
-    function pdfSummaryHTML({ fy, settings, totalIncome, totalExpenses, net, shareA, shareB, catRows, gstTotal }) {
-      const cur = settings.currency;
-      const gstSection = settings.gstEnabled ? `
-        <h2 class="pdf-h">GST paid (component of GST-inclusive expenses)</h2>
-        <div class="pdf-tile">
-          <div class="pdf-label">Rate ${settings.gstRate}%</div>
-          <div class="pdf-big">${esc(fmt(gstTotal, cur))}</div>
-        </div>` : '';
-
-      return `${PDF_STYLE}<div class="pdf-root">
-        <div class="pdf-header">
-          <div class="pdf-title">Ventra — FY${fy} Summary</div>
-          <div class="pdf-sub">${esc(settings.partnerA)} &amp; ${esc(settings.partnerB)} · Jul ${fy-1} – Jun ${fy} · 50/50 split${settings.gstEnabled ? ' · GST registered' : ''}</div>
-        </div>
-
-        <div class="pdf-grid">
-          <div class="pdf-tile">
-            <div class="pdf-label">Income</div>
-            <div class="pdf-big">${esc(fmt(totalIncome, cur))}</div>
-          </div>
-          <div class="pdf-tile">
-            <div class="pdf-label">Expenses</div>
-            <div class="pdf-big">${esc(fmt(totalExpenses, cur))}</div>
-          </div>
-          <div class="pdf-tile accent">
-            <div class="pdf-label">Net profit (before tax)</div>
-            <div class="pdf-big">${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), cur))}</div>
-          </div>
-        </div>
-
-        <h2 class="pdf-h">Partner split — 50 / 50</h2>
-        <div class="pdf-split">
-          <div class="pdf-tile">
-            <div class="pdf-label">${esc(settings.partnerA)}</div>
-            <div class="pdf-big">${shareA >= 0 ? '' : '-'}${esc(fmt(Math.abs(shareA), cur))}</div>
-          </div>
-          <div class="pdf-tile">
-            <div class="pdf-label">${esc(settings.partnerB)}</div>
-            <div class="pdf-big">${shareB >= 0 ? '' : '-'}${esc(fmt(Math.abs(shareB), cur))}</div>
-          </div>
-        </div>
-
-        <h2 class="pdf-h">Expenses by category</h2>
-        <table class="pdf-table">
-          <thead>
-            <tr><th>Category</th><th class="num">Count</th><th class="num">Total</th><th class="num">Share</th></tr>
-          </thead>
-          <tbody>
-            ${catRows.map(r => `<tr>
-              <td>${esc(r.cat)}</td>
-              <td class="num">${r.count}</td>
-              <td class="num">${esc(fmt(r.total, cur))}</td>
-              <td class="num">${r.pct.toFixed(1)}%</td>
-            </tr>`).join('')}
-            <tr class="pdf-total-row">
-              <td>Total</td>
-              <td class="num">${catRows.reduce((s,r)=>s+r.count,0)}</td>
-              <td class="num">${esc(fmt(totalExpenses, cur))}</td>
-              <td class="num"></td>
-            </tr>
-          </tbody>
-        </table>
-
-        ${gstSection}
-
-        <div class="pdf-footer">Generated ${esc(new Date().toLocaleString('en-AU'))} · Ventra Ledger</div>
-      </div>`;
+    // Strip the currency symbol that Intl might render as a non-Latin-1 glyph
+    // (jsPDF's built-in Helvetica only supports Latin-1). We want things like
+    // "A$1,234.56" / "$1,234.56" / "NZ$12.00", not the odd "AUD 12.00".
+    function pdfMoney(n, currency = 'AUD') {
+      const num = Number(n) || 0;
+      const sym = ({ AUD: 'A$', USD: '$', GBP: '£', EUR: '€', NZD: 'NZ$' })[currency] || '$';
+      // £ / € are Latin-1; jsPDF handles them. Fallback to plain $ for anything else.
+      const safeSym = /[£€$A-Z]/.test(sym) ? sym : '$';
+      return `${safeSym}${num.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
     }
 
-    function pdfDetailedHTML({ fy, settings, totalIncome, totalExpenses, net, shareA, shareB, catRows, gstTotal, fyIncome, fyExpenses, fyUncollected, fyLoans }) {
-      const cur = settings.currency;
-      const sortByDate = (a, b) => (a.date || '').localeCompare(b.date || '');
-      const sortedIncome   = [...fyIncome].sort(sortByDate);
-      const sortedExpenses = [...fyExpenses].sort(sortByDate);
-      const sortedUnc      = [...fyUncollected].sort(sortByDate);
-      const sortedLoans    = [...fyLoans].sort(sortByDate);
-      const gstCol = settings.gstEnabled ? '<th class="num">GST</th>' : '';
-
-      return `${PDF_STYLE}<div class="pdf-root">
-        <div class="pdf-header">
-          <div class="pdf-title">Ventra — FY${fy} Detailed Report</div>
-          <div class="pdf-sub">${esc(settings.partnerA)} &amp; ${esc(settings.partnerB)} · Jul ${fy-1} – Jun ${fy} · 50/50 split${settings.gstEnabled ? ' · GST registered' : ''}</div>
-        </div>
-
-        <div class="pdf-grid">
-          <div class="pdf-tile"><div class="pdf-label">Income</div><div class="pdf-big">${esc(fmt(totalIncome, cur))}</div></div>
-          <div class="pdf-tile"><div class="pdf-label">Expenses</div><div class="pdf-big">${esc(fmt(totalExpenses, cur))}</div></div>
-          <div class="pdf-tile accent"><div class="pdf-label">Net profit</div><div class="pdf-big">${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), cur))}</div></div>
-        </div>
-
-        <h2 class="pdf-h">Partner split — 50 / 50</h2>
-        <div class="pdf-split">
-          <div class="pdf-tile"><div class="pdf-label">${esc(settings.partnerA)}</div><div class="pdf-big">${shareA >= 0 ? '' : '-'}${esc(fmt(Math.abs(shareA), cur))}</div></div>
-          <div class="pdf-tile"><div class="pdf-label">${esc(settings.partnerB)}</div><div class="pdf-big">${shareB >= 0 ? '' : '-'}${esc(fmt(Math.abs(shareB), cur))}</div></div>
-        </div>
-
-        ${settings.gstEnabled ? `
-        <h2 class="pdf-h">GST paid</h2>
-        <div class="pdf-tile"><div class="pdf-label">Rate ${settings.gstRate}%</div><div class="pdf-big">${esc(fmt(gstTotal, cur))}</div></div>` : ''}
-
-        <h2 class="pdf-h">Expenses by category</h2>
-        <table class="pdf-table">
-          <thead><tr><th>Category</th><th class="num">Count</th><th class="num">Total</th><th class="num">Share</th></tr></thead>
-          <tbody>
-            ${catRows.map(r => `<tr><td>${esc(r.cat)}</td><td class="num">${r.count}</td><td class="num">${esc(fmt(r.total, cur))}</td><td class="num">${r.pct.toFixed(1)}%</td></tr>`).join('')}
-            <tr class="pdf-total-row"><td>Total</td><td class="num">${catRows.reduce((s,r)=>s+r.count,0)}</td><td class="num">${esc(fmt(totalExpenses, cur))}</td><td class="num"></td></tr>
-          </tbody>
-        </table>
-
-        <div class="pdf-page-break"></div>
-
-        <h2 class="pdf-h">Income — all entries</h2>
-        <table class="pdf-table">
-          <thead><tr><th>Date</th><th>Source</th><th>Notes</th><th class="num">Amount</th></tr></thead>
-          <tbody>
-            ${sortedIncome.map(i => `<tr>
-              <td>${esc(fmtDate(i.date))}</td>
-              <td>${esc(i.source || '')}</td>
-              <td>${esc(i.notes || '')}</td>
-              <td class="num">${esc(fmt(parseAmount(i.amount), cur))}</td>
-            </tr>`).join('')}
-            <tr class="pdf-total-row"><td colspan="3">Total</td><td class="num">${esc(fmt(totalIncome, cur))}</td></tr>
-          </tbody>
-        </table>
-
-        <div class="pdf-page-break"></div>
-
-        <h2 class="pdf-h">Expenses — all entries</h2>
-        <table class="pdf-table">
-          <thead><tr><th>Date</th><th>Vendor</th><th>Category</th><th>Notes</th>${gstCol}<th class="num">Amount</th></tr></thead>
-          <tbody>
-            ${sortedExpenses.map(e => {
-              const gst = (settings.gstEnabled && e.gstInclusive) ? parseAmount(e.amount) * (settings.gstRate / (100 + settings.gstRate)) : 0;
-              return `<tr>
-                <td>${esc(fmtDate(e.date))}</td>
-                <td>${esc(e.vendor || '')}</td>
-                <td>${esc(e.category || '')}</td>
-                <td>${esc(e.notes || '')}</td>
-                ${settings.gstEnabled ? `<td class="num">${gst ? esc(fmt(gst, cur)) : ''}</td>` : ''}
-                <td class="num">${esc(fmt(parseAmount(e.amount), cur))}</td>
-              </tr>`;
-            }).join('')}
-            <tr class="pdf-total-row"><td colspan="${settings.gstEnabled ? 5 : 4}">Total</td><td class="num">${esc(fmt(totalExpenses, cur))}</td></tr>
-          </tbody>
-        </table>
-
-        ${sortedUnc.length ? `
-        <div class="pdf-page-break"></div>
-        <h2 class="pdf-h">Uncollected / receivables</h2>
-        <table class="pdf-table">
-          <thead><tr><th>Date</th><th>Client</th><th>Assigned to</th><th>Status</th><th>Notes</th><th class="num">Amount</th></tr></thead>
-          <tbody>
-            ${sortedUnc.map(u => `<tr>
-              <td>${esc(fmtDate(u.date))}</td>
-              <td>${esc(u.client || '')}</td>
-              <td>${esc(u.assignedTo || '')}</td>
-              <td>${u.collected ? 'collected' : 'outstanding'}</td>
-              <td>${esc(u.notes || '')}</td>
-              <td class="num">${esc(fmt(parseAmount(u.amount), cur))}</td>
-            </tr>`).join('')}
-          </tbody>
-        </table>` : ''}
-
-        ${sortedLoans.length ? `
-        <h2 class="pdf-h">Loans</h2>
-        <table class="pdf-table">
-          <thead><tr><th>Date</th><th>Counterparty</th><th>Direction</th><th>Notes</th><th class="num">Amount</th></tr></thead>
-          <tbody>
-            ${sortedLoans.map(l => `<tr>
-              <td>${esc(fmtDate(l.date))}</td>
-              <td>${esc(l.counterparty || '')}</td>
-              <td>${l.direction === 'out' ? 'loaned' : 'paid back'}</td>
-              <td>${esc(l.notes || '')}</td>
-              <td class="num">${esc(fmt(parseAmount(l.amount), cur))}</td>
-            </tr>`).join('')}
-          </tbody>
-        </table>` : ''}
-
-        <div class="pdf-footer">Generated ${esc(new Date().toLocaleString('en-AU'))} · Ventra Ledger</div>
-      </div>`;
+    // Build a jsPDF document with a shared layout context.
+    function pdfContext(doc) {
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+      const margin = 48;
+      return {
+        doc, pageW, pageH, margin,
+        contentW: pageW - margin * 2,
+        y: margin,
+        page: 1,
+      };
     }
 
-    async function htmlToPdfBlob(htmlString) {
-      await ensureHtml2Pdf();
-      const container = document.createElement('div');
-      container.style.cssText = 'position: fixed; left: -10000px; top: 0; width: 794px; z-index: -1;';
-      container.innerHTML = htmlString;
-      document.body.appendChild(container);
-      try {
-        const opt = {
-          margin: 0,
-          filename: 'page.pdf',
-          image: { type: 'jpeg', quality: 0.96 },
-          html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false },
-          jsPDF: { unit: 'px', format: [794, 1123], orientation: 'portrait', hotfixes: ['px_scaling'] },
-          pagebreak: { mode: ['css', 'legacy'] }
-        };
-        const pdfBlob = await html2pdf().set(opt).from(container).outputPdf('blob');
-        return pdfBlob;
-      } finally {
-        container.remove();
+    // Drawing helpers — all take and return/mutate the context `y` cursor.
+    function pdfHeader(ctx, title, subtitle) {
+      const { doc, pageW, margin } = ctx;
+      doc.setFont('times', 'normal').setFontSize(22).setTextColor(28, 25, 23);
+      doc.text(title, margin, margin + 16);
+      doc.setFont('helvetica', 'normal').setFontSize(9).setTextColor(122, 115, 107);
+      doc.text(subtitle, margin, margin + 32);
+      doc.setDrawColor(207, 202, 192).setLineWidth(0.5);
+      doc.line(margin, margin + 42, pageW - margin, margin + 42);
+      ctx.y = margin + 60;
+    }
+
+    function pdfFooter(ctx) {
+      const { doc, pageW, pageH, margin } = ctx;
+      doc.setFont('helvetica', 'normal').setFontSize(8).setTextColor(138, 133, 128);
+      const text = `Generated ${new Date().toLocaleString('en-AU')} · Ventra Ledger · Page ${ctx.page}`;
+      doc.text(text, pageW / 2, pageH - margin / 2, { align: 'center' });
+    }
+
+    function pdfSectionTitle(ctx, text) {
+      const { doc, margin } = ctx;
+      doc.setFont('times', 'normal').setFontSize(13).setTextColor(28, 25, 23);
+      doc.text(text, margin, ctx.y + 12);
+      ctx.y += 20;
+    }
+
+    function pdfTile(ctx, x, w, label, value, { accent = false } = {}) {
+      const { doc } = ctx;
+      const h = 54;
+      if (accent) doc.setFillColor(242, 236, 255).setDrawColor(221, 211, 245);
+      else        doc.setFillColor(250, 250, 247).setDrawColor(229, 225, 216);
+      doc.setLineWidth(0.5);
+      doc.roundedRect(x, ctx.y, w, h, 5, 5, 'FD');
+      doc.setFont('helvetica', 'normal').setFontSize(7.5).setTextColor(138, 133, 128);
+      doc.text(label.toUpperCase(), x + 12, ctx.y + 16);
+      doc.setFont('courier', 'normal').setFontSize(15).setTextColor(28, 25, 23);
+      doc.text(value, x + 12, ctx.y + 40);
+    }
+
+    function pdfTilesRow(ctx, tiles) {
+      const { margin, contentW } = ctx;
+      const gap = 10;
+      const w = (contentW - gap * (tiles.length - 1)) / tiles.length;
+      tiles.forEach((t, i) => pdfTile(ctx, margin + (w + gap) * i, w, t.label, t.value, { accent: t.accent }));
+      ctx.y += 54 + 16;
+    }
+
+    // Simple row-based table. `columns` = [{ header, x, width, align, mono }]
+    function pdfTable(ctx, columns, rows, { headerRedrawOnPage = true, totalRow = null } = {}) {
+      const { doc, margin, pageH } = ctx;
+      const rowH = 16;
+      const headerH = 18;
+      const bottomPad = 30;
+
+      const drawHeader = () => {
+        doc.setFont('helvetica', 'bold').setFontSize(8).setTextColor(106, 101, 95);
+        columns.forEach(c => doc.text(c.header.toUpperCase(), c.x, ctx.y + 10, { align: c.align || 'left' }));
+        doc.setDrawColor(207, 202, 192).setLineWidth(0.6);
+        doc.line(margin, ctx.y + 13, ctx.pageW - margin, ctx.y + 13);
+        ctx.y += headerH;
+      };
+
+      drawHeader();
+
+      doc.setFont('helvetica', 'normal').setFontSize(9).setTextColor(28, 25, 23);
+      rows.forEach(r => {
+        if (ctx.y + rowH > pageH - bottomPad) {
+          pdfFooter(ctx);
+          doc.addPage();
+          ctx.page++;
+          ctx.y = margin;
+          if (headerRedrawOnPage) drawHeader();
+          doc.setFont('helvetica', 'normal').setFontSize(9).setTextColor(28, 25, 23);
+        }
+        columns.forEach(c => {
+          const v = String(r[c.key] ?? '');
+          if (c.mono) doc.setFont('courier', 'normal'); else doc.setFont('helvetica', 'normal');
+          const maxW = c.maxW || c.width - 4;
+          const text = doc.splitTextToSize(v, maxW)[0] || '';
+          doc.text(text, c.x, ctx.y + 11, { align: c.align || 'left' });
+        });
+        doc.setDrawColor(239, 236, 230).setLineWidth(0.3);
+        doc.line(margin, ctx.y + rowH - 2, ctx.pageW - margin, ctx.y + rowH - 2);
+        ctx.y += rowH;
+      });
+
+      if (totalRow) {
+        if (ctx.y + rowH + 4 > pageH - bottomPad) {
+          pdfFooter(ctx); doc.addPage(); ctx.page++; ctx.y = margin;
+        }
+        doc.setDrawColor(207, 202, 192).setLineWidth(0.8);
+        doc.line(margin, ctx.y + 2, ctx.pageW - margin, ctx.y + 2);
+        doc.setFont('helvetica', 'bold').setFontSize(9).setTextColor(28, 25, 23);
+        columns.forEach(c => {
+          const v = totalRow[c.key];
+          if (v == null) return;
+          if (c.mono) doc.setFont('courier', 'bold'); else doc.setFont('helvetica', 'bold');
+          doc.text(String(v), c.x, ctx.y + 14, { align: c.align || 'left' });
+        });
+        ctx.y += rowH + 4;
       }
+      ctx.y += 8;
+    }
+
+    function pdfEnsureSpace(ctx, needed) {
+      if (ctx.y + needed > ctx.pageH - 30) {
+        pdfFooter(ctx);
+        ctx.doc.addPage();
+        ctx.page++;
+        ctx.y = ctx.margin;
+      }
+    }
+
+    async function buildSummaryPdf({ fy, settings, totalIncome, totalExpenses, net, shareA, shareB, catRows, gstTotal, fyExpenses }) {
+      const jsPDF = await ensureJsPDF();
+      const doc = new jsPDF({ unit: 'pt', format: 'a4', compress: true });
+      const ctx = pdfContext(doc);
+      const cur = settings.currency;
+      const gstSuffix = settings.gstEnabled ? ' · GST registered' : '';
+
+      pdfHeader(ctx,
+        `Ventra — FY${fy} Summary`,
+        `${settings.partnerA} & ${settings.partnerB} · Jul ${fy - 1} - Jun ${fy} · 50/50 split${gstSuffix}`);
+
+      pdfTilesRow(ctx, [
+        { label: 'Income',     value: pdfMoney(totalIncome, cur) },
+        { label: 'Expenses',   value: pdfMoney(totalExpenses, cur) },
+        { label: 'Net profit', value: (net < 0 ? '-' : '') + pdfMoney(Math.abs(net), cur), accent: true },
+      ]);
+
+      pdfSectionTitle(ctx, 'Partner split - 50 / 50');
+      pdfTilesRow(ctx, [
+        { label: settings.partnerA, value: (shareA < 0 ? '-' : '') + pdfMoney(Math.abs(shareA), cur) },
+        { label: settings.partnerB, value: (shareB < 0 ? '-' : '') + pdfMoney(Math.abs(shareB), cur) },
+      ]);
+
+      // Expenses by category table
+      pdfSectionTitle(ctx, 'Expenses by category');
+      const { pageW, margin } = ctx;
+      const columns = [
+        { key: 'cat',   header: 'Category', x: margin,               width: 240, align: 'left'  },
+        { key: 'count', header: 'Count',    x: pageW - margin - 230, width: 60,  align: 'right' },
+        { key: 'total', header: 'Total',    x: pageW - margin - 90,  width: 90,  align: 'right', mono: true },
+        { key: 'share', header: 'Share',    x: pageW - margin,       width: 60,  align: 'right' },
+      ];
+      const rows = catRows.map(r => ({
+        cat: r.cat,
+        count: r.count,
+        total: pdfMoney(r.total, cur),
+        share: r.pct.toFixed(1) + '%',
+      }));
+      pdfTable(ctx, columns, rows, {
+        totalRow: {
+          cat: 'Total',
+          count: String(fyExpenses.length),
+          total: pdfMoney(totalExpenses, cur),
+        },
+      });
+
+      if (settings.gstEnabled) {
+        pdfEnsureSpace(ctx, 80);
+        pdfSectionTitle(ctx, 'GST paid (component of GST-inclusive expenses)');
+        pdfTilesRow(ctx, [
+          { label: `Rate ${settings.gstRate}%`, value: pdfMoney(gstTotal, cur) },
+        ]);
+      }
+
+      pdfFooter(ctx);
+      return doc.output('blob');
+    }
+
+    async function buildDetailedPdf({ fy, settings, totalIncome, totalExpenses, net, shareA, shareB, catRows, gstTotal, fyIncome, fyExpenses, fyUncollected, fyLoans }) {
+      const jsPDF = await ensureJsPDF();
+      const doc = new jsPDF({ unit: 'pt', format: 'a4', compress: true });
+      const ctx = pdfContext(doc);
+      const cur = settings.currency;
+      const gstSuffix = settings.gstEnabled ? ' · GST registered' : '';
+      const byDate = (a, b) => (a.date || '').localeCompare(b.date || '');
+
+      pdfHeader(ctx,
+        `Ventra — FY${fy} Detailed Report`,
+        `${settings.partnerA} & ${settings.partnerB} · Jul ${fy - 1} - Jun ${fy} · 50/50 split${gstSuffix}`);
+
+      pdfTilesRow(ctx, [
+        { label: 'Income',     value: pdfMoney(totalIncome, cur) },
+        { label: 'Expenses',   value: pdfMoney(totalExpenses, cur) },
+        { label: 'Net profit', value: (net < 0 ? '-' : '') + pdfMoney(Math.abs(net), cur), accent: true },
+      ]);
+
+      pdfSectionTitle(ctx, 'Partner split - 50 / 50');
+      pdfTilesRow(ctx, [
+        { label: settings.partnerA, value: (shareA < 0 ? '-' : '') + pdfMoney(Math.abs(shareA), cur) },
+        { label: settings.partnerB, value: (shareB < 0 ? '-' : '') + pdfMoney(Math.abs(shareB), cur) },
+      ]);
+
+      if (settings.gstEnabled) {
+        pdfEnsureSpace(ctx, 90);
+        pdfSectionTitle(ctx, 'GST paid');
+        pdfTilesRow(ctx, [
+          { label: `Rate ${settings.gstRate}%`, value: pdfMoney(gstTotal, cur) },
+        ]);
+      }
+
+      pdfEnsureSpace(ctx, 140);
+      pdfSectionTitle(ctx, 'Expenses by category');
+      const { pageW, margin } = ctx;
+      {
+        const columns = [
+          { key: 'cat',   header: 'Category', x: margin,               align: 'left'  },
+          { key: 'count', header: 'Count',    x: pageW - margin - 230, align: 'right' },
+          { key: 'total', header: 'Total',    x: pageW - margin - 90,  align: 'right', mono: true },
+          { key: 'share', header: 'Share',    x: pageW - margin,       align: 'right' },
+        ];
+        const rows = catRows.map(r => ({
+          cat: r.cat,
+          count: r.count,
+          total: pdfMoney(r.total, cur),
+          share: r.pct.toFixed(1) + '%',
+        }));
+        pdfTable(ctx, columns, rows, {
+          totalRow: { cat: 'Total', count: String(fyExpenses.length), total: pdfMoney(totalExpenses, cur) },
+        });
+      }
+
+      // New page for line items
+      pdfFooter(ctx); doc.addPage(); ctx.page++; ctx.y = ctx.margin;
+      pdfSectionTitle(ctx, 'Income — all entries');
+      {
+        const columns = [
+          { key: 'date',   header: 'Date',   x: margin,               align: 'left'  },
+          { key: 'source', header: 'Source', x: margin + 80,          align: 'left'  },
+          { key: 'notes',  header: 'Notes',  x: margin + 240,         align: 'left'  },
+          { key: 'amount', header: 'Amount', x: pageW - margin,       align: 'right', mono: true },
+        ];
+        const rows = [...fyIncome].sort(byDate).map(i => ({
+          date: fmtDate(i.date),
+          source: i.source || '',
+          notes: i.notes || '',
+          amount: pdfMoney(parseAmount(i.amount), cur),
+        }));
+        pdfTable(ctx, columns, rows, {
+          totalRow: { date: 'Total', amount: pdfMoney(totalIncome, cur) },
+        });
+      }
+
+      pdfEnsureSpace(ctx, 120);
+      pdfSectionTitle(ctx, 'Expenses — all entries');
+      {
+        const gstOn = settings.gstEnabled;
+        const columns = gstOn ? [
+          { key: 'date',     header: 'Date',     x: margin,              align: 'left'  },
+          { key: 'vendor',   header: 'Vendor',   x: margin + 72,         align: 'left'  },
+          { key: 'category', header: 'Category', x: margin + 200,        align: 'left'  },
+          { key: 'notes',    header: 'Notes',    x: margin + 310,        align: 'left'  },
+          { key: 'gst',      header: 'GST',      x: pageW - margin - 70, align: 'right', mono: true },
+          { key: 'amount',   header: 'Amount',   x: pageW - margin,      align: 'right', mono: true },
+        ] : [
+          { key: 'date',     header: 'Date',     x: margin,              align: 'left'  },
+          { key: 'vendor',   header: 'Vendor',   x: margin + 72,         align: 'left'  },
+          { key: 'category', header: 'Category', x: margin + 200,        align: 'left'  },
+          { key: 'notes',    header: 'Notes',    x: margin + 330,        align: 'left'  },
+          { key: 'amount',   header: 'Amount',   x: pageW - margin,      align: 'right', mono: true },
+        ];
+        const rows = [...fyExpenses].sort(byDate).map(e => {
+          const gst = (gstOn && e.gstInclusive) ? parseAmount(e.amount) * (settings.gstRate / (100 + settings.gstRate)) : 0;
+          return {
+            date: fmtDate(e.date),
+            vendor: e.vendor || '',
+            category: e.category || '',
+            notes: e.notes || '',
+            gst: gst ? pdfMoney(gst, cur) : '',
+            amount: pdfMoney(parseAmount(e.amount), cur),
+          };
+        });
+        pdfTable(ctx, columns, rows, {
+          totalRow: { date: 'Total', amount: pdfMoney(totalExpenses, cur) },
+        });
+      }
+
+      if (fyUncollected.length) {
+        pdfEnsureSpace(ctx, 100);
+        pdfSectionTitle(ctx, 'Uncollected / receivables');
+        const columns = [
+          { key: 'date',     header: 'Date',        x: margin,              align: 'left'  },
+          { key: 'client',   header: 'Client',      x: margin + 72,         align: 'left'  },
+          { key: 'assigned', header: 'Assigned to', x: margin + 200,        align: 'left'  },
+          { key: 'status',   header: 'Status',      x: margin + 290,        align: 'left'  },
+          { key: 'notes',    header: 'Notes',       x: margin + 360,        align: 'left'  },
+          { key: 'amount',   header: 'Amount',      x: pageW - margin,      align: 'right', mono: true },
+        ];
+        const rows = [...fyUncollected].sort(byDate).map(u => ({
+          date: fmtDate(u.date),
+          client: u.client || '',
+          assigned: u.assignedTo || '',
+          status: u.collected ? 'collected' : 'outstanding',
+          notes: u.notes || '',
+          amount: pdfMoney(parseAmount(u.amount), cur),
+        }));
+        pdfTable(ctx, columns, rows);
+      }
+
+      if (fyLoans.length) {
+        pdfEnsureSpace(ctx, 100);
+        pdfSectionTitle(ctx, 'Loans');
+        const columns = [
+          { key: 'date',         header: 'Date',         x: margin,         align: 'left'  },
+          { key: 'counterparty', header: 'Counterparty', x: margin + 72,    align: 'left'  },
+          { key: 'direction',    header: 'Direction',    x: margin + 230,   align: 'left'  },
+          { key: 'notes',        header: 'Notes',        x: margin + 320,   align: 'left'  },
+          { key: 'amount',       header: 'Amount',       x: pageW - margin, align: 'right', mono: true },
+        ];
+        const rows = [...fyLoans].sort(byDate).map(l => ({
+          date: fmtDate(l.date),
+          counterparty: l.counterparty || '',
+          direction: l.direction === 'out' ? 'loaned' : 'paid back',
+          notes: l.notes || '',
+          amount: pdfMoney(parseAmount(l.amount), cur),
+        }));
+        pdfTable(ctx, columns, rows);
+      }
+
+      pdfFooter(ctx);
+      return doc.output('blob');
     }
 
     async function actGenerateEofyPack() {
@@ -2225,9 +2355,9 @@
         // 04 + 05 — PDFs
         if (btn) btn.innerHTML = `<span class="spin">${icon('clock', 14)}</span> Rendering PDFs…`;
         const dataForPdfs = { fy, settings, totalIncome, totalExpenses, net, shareA, shareB, catRows, gstTotal, fyIncome, fyExpenses, fyUncollected, fyLoans };
-        const summaryBlob  = await htmlToPdfBlob(pdfSummaryHTML(dataForPdfs));
+        const summaryBlob = await buildSummaryPdf(dataForPdfs);
         zip.file('04-fy-summary.pdf', summaryBlob);
-        const detailedBlob = await htmlToPdfBlob(pdfDetailedHTML(dataForPdfs));
+        const detailedBlob = await buildDetailedPdf(dataForPdfs);
         zip.file('05-fy-detailed.pdf', detailedBlob);
 
         // Zip and download
