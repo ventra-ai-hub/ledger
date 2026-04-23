@@ -1,0 +1,1974 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#2d2924" />
+  <title>Ventra Ledger</title>
+
+  <!-- Tailwind Play CDN (JIT, supports arbitrary values) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Guard: if the CDN fails to load, don't blow up the page.
+    if (typeof tailwind !== 'undefined') {
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              serif: ["'Fraunces'", "serif"],
+              sans: ["'DM Sans'", "system-ui", "sans-serif"],
+              mono: ["'JetBrains Mono'", "monospace"]
+            }
+          }
+        }
+      };
+    }
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;1,9..144,300&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <style>
+    html, body { background: #f5efe6; color: #1c1917; }
+    body { font-family: 'DM Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    .font-serif { font-family: 'Fraunces', serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+    .tabular-nums { font-variant-numeric: tabular-nums; }
+    input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.4; cursor: pointer; }
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type="number"] { -moz-appearance: textfield; }
+    ::selection { background: #d6ccbe; color: #2a2520; }
+
+    @keyframes dropdownIn {
+      from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .dropdown-menu { animation: dropdownIn 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+
+    /* Hide scrollbar on mobile tab bar */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+    /* Safe-area for iOS PWA bottom tabs */
+    .pb-safe { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
+
+    /* Print stylesheet — Tax tab one-pager */
+    @media print {
+      body { background: white; }
+      .no-print { display: none !important; }
+      .print-only { display: block !important; }
+      main { margin: 0 !important; padding: 0 !important; }
+      .print-page { padding: 0.5in; }
+    }
+    .print-only { display: none; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div class="min-h-screen flex items-center justify-center" style="background-color: #f5efe6;">
+      <div class="text-stone-500 text-sm">Loading…</div>
+    </div>
+  </div>
+
+  <script>
+    'use strict';
+
+    // ============ Constants ============
+    const STORAGE_KEY = 'ventra-ledger-v1';
+    const USER_KEY = 'ventra-ledger-user';
+    const MONTHS_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const EXPENSE_CATEGORIES = [
+      'Software/SaaS', 'Telephony/Telco', 'Contractors', 'Marketing',
+      'Subscriptions', 'Office', 'Travel', 'Professional Fees', 'Bank Fees', 'Other'
+    ];
+    const CURRENCY_OPTIONS = [
+      { value: 'AUD', label: 'AUD — Australian Dollar' },
+      { value: 'USD', label: 'USD — US Dollar' },
+      { value: 'GBP', label: 'GBP — British Pound' },
+      { value: 'EUR', label: 'EUR — Euro' },
+      { value: 'NZD', label: 'NZD — New Zealand Dollar' }
+    ];
+
+    const defaultSettings = {
+      partnerA: 'Dan',
+      partnerB: 'Nelson',
+      splitA: 50,
+      splitB: 50,
+      currency: 'AUD',
+      gstEnabled: false,
+      gstRate: 10
+    };
+
+    const defaultData = {
+      expenses: [],
+      income: [],
+      uncollected: [],
+      loans: [],
+      settings: { ...defaultSettings },
+      dataModifiedAt: null
+    };
+
+    // ============ Helpers ============
+    const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+
+    const todayISO = () => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    };
+
+    const monthKey = (iso) => iso ? iso.slice(0, 7) : '';
+
+    // AU financial year: Jul 1 (year X) – Jun 30 (year X+1) → named FY{X+1}
+    const fyFromISO = (iso) => {
+      if (!iso) return null;
+      const [y, m] = iso.split('-').map(Number);
+      return m >= 7 ? y + 1 : y;
+    };
+    const fyKey = (iso) => {
+      const y = fyFromISO(iso);
+      return y ? `FY${y}` : '';
+    };
+    const currentFYNum = () => fyFromISO(todayISO());
+    const fyRange = (n) => ({ start: `${n-1}-07-01`, end: `${n}-06-30` });
+    const isoInFY = (iso, n) => {
+      if (!iso || !n) return false;
+      const r = fyRange(n);
+      return iso >= r.start && iso <= r.end;
+    };
+
+    const fmt = (n, currency = 'AUD') => {
+      const num = Number(n) || 0;
+      try {
+        return new Intl.NumberFormat('en-AU', { style: 'currency', currency, minimumFractionDigits: 2 }).format(num);
+      } catch { return `$${num.toFixed(2)}`; }
+    };
+
+    const fmtDate = (iso) => {
+      if (!iso) return '';
+      const [y, m, d] = iso.split('-');
+      return `${d}/${m}/${y.slice(-2)}`;
+    };
+
+    const relTime = (iso) => {
+      if (!iso) return '';
+      const t = new Date(iso).getTime();
+      if (isNaN(t)) return '';
+      const diff = Date.now() - t;
+      const min = 60 * 1000, hr = 60 * min, day = 24 * hr;
+      if (diff < min) return 'just now';
+      if (diff < hr) return `${Math.floor(diff / min)}m ago`;
+      if (diff < day) return `${Math.floor(diff / hr)}h ago`;
+      if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`;
+      const d = new Date(t);
+      return `${d.getDate()}/${d.getMonth()+1}/${String(d.getFullYear()).slice(-2)}`;
+    };
+
+    const parseFlexDate = (s) => {
+      if (!s) return todayISO();
+      const str = String(s).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+      const m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+      if (m) {
+        let [, d, mo, y] = m;
+        if (y.length === 2) y = '20' + y;
+        return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      }
+      return todayISO();
+    };
+
+    const parseAmount = (s) => {
+      if (typeof s === 'number') return s;
+      if (!s) return 0;
+      return parseFloat(String(s).replace(/[$,\s]/g, '')) || 0;
+    };
+
+    const toCSV = (rows, headers) => {
+      const esc = (v) => {
+        const s = v == null ? '' : String(v);
+        if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      };
+      return [headers.map(esc).join(','), ...rows.map(r => r.map(esc).join(','))].join('\n');
+    };
+
+    const parseCSV = (text) => {
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      if (lines.length === 0) return [];
+      const parseLine = (line) => {
+        const cells = []; let cur = ''; let inQ = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (inQ) {
+            if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
+            else if (ch === '"') inQ = false;
+            else cur += ch;
+          } else {
+            if (ch === ',') { cells.push(cur); cur = ''; }
+            else if (ch === '"') inQ = true;
+            else cur += ch;
+          }
+        }
+        cells.push(cur);
+        return cells;
+      };
+      const headers = parseLine(lines[0]).map(h => h.trim().toLowerCase());
+      return lines.slice(1).map(line => {
+        const cells = parseLine(line);
+        const obj = {};
+        headers.forEach((h, i) => obj[h] = (cells[i] || '').trim());
+        return obj;
+      });
+    };
+
+    const download = (filename, content, type = 'text/plain') => {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 100);
+    };
+
+    // HTML escaping for user content interpolated into templates
+    const esc = (s) => {
+      if (s == null) return '';
+      return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    };
+
+    // Attribute escaping (stricter — for values inside HTML attributes)
+    const attr = (s) => esc(s);
+
+    // ============ Migration ============
+    // One-shot: rename legacy `description` → `client` / `counterparty`
+    // Ensure all entries have editedBy/editedAt optionals and expenses have category.
+    function migrate(data) {
+      if (!data || typeof data !== 'object') return { ...defaultData };
+      const out = {
+        ...defaultData,
+        ...data,
+        settings: { ...defaultSettings, ...(data.settings || {}) },
+      };
+      out.expenses = (out.expenses || []).map(e => ({
+        id: e.id || uid(),
+        vendor: e.vendor || '',
+        date: e.date || todayISO(),
+        amount: parseAmount(e.amount),
+        category: e.category || '',
+        notes: e.notes || '',
+        editedBy: e.editedBy || undefined,
+        editedAt: e.editedAt || undefined,
+        gstInclusive: e.gstInclusive || false
+      }));
+      out.income = (out.income || []).map(i => ({
+        id: i.id || uid(),
+        source: i.source || '',
+        date: i.date || todayISO(),
+        amount: parseAmount(i.amount),
+        notes: i.notes || '',
+        editedBy: i.editedBy || undefined,
+        editedAt: i.editedAt || undefined
+      }));
+      out.uncollected = (out.uncollected || []).map(u => ({
+        id: u.id || uid(),
+        // legacy `description` → `client`
+        client: u.client || u.description || '',
+        date: u.date || todayISO(),
+        amount: parseAmount(u.amount),
+        collected: !!u.collected,
+        assignedTo: u.assignedTo || '',
+        notes: u.notes || '',
+        editedBy: u.editedBy || undefined,
+        editedAt: u.editedAt || undefined
+      }));
+      out.loans = (out.loans || []).map(l => ({
+        id: l.id || uid(),
+        // legacy `description` → `counterparty`
+        counterparty: l.counterparty || l.description || '',
+        date: l.date || todayISO(),
+        amount: parseAmount(l.amount),
+        direction: l.direction || 'out',
+        notes: l.notes || '',
+        editedBy: l.editedBy || undefined,
+        editedAt: l.editedAt || undefined
+      }));
+      return out;
+    }
+
+    // ============ Storage ============
+    function loadData() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return migrate(defaultData);
+        return migrate(JSON.parse(raw));
+      } catch (err) {
+        console.error('loadData failed:', err);
+        return migrate(defaultData);
+      }
+    }
+
+    function saveData(data) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        return true;
+      } catch (err) {
+        console.error('saveData failed:', err);
+        return false;
+      }
+    }
+
+    function loadUser() { return localStorage.getItem(USER_KEY) || ''; }
+    function saveUser(name) {
+      if (name) localStorage.setItem(USER_KEY, name);
+      else localStorage.removeItem(USER_KEY);
+    }
+
+    // ============ State ============
+    const state = {
+      data: loadData(),
+      userName: loadUser(),
+      tab: 'overview',
+      period: 'month',               // 'month' | 'fy'
+      currentMonth: todayISO().slice(0, 7),
+      currentFY: currentFYNum(),
+      editingId: null,
+      openDropdown: null,            // id of currently-open custom dropdown
+      saving: false,
+      filterExpense: 'all',          // 'all' or period key
+      filterIncome: 'all',
+      sortExpense: { field: 'date', dir: 'desc' },
+      sortIncome: { field: 'date', dir: 'desc' }
+    };
+
+    // Stamp an entry with editedBy + editedAt (from current userName, if set)
+    function stamp(entry) {
+      const now = new Date().toISOString();
+      return {
+        ...entry,
+        editedAt: now,
+        editedBy: state.userName || entry.editedBy || undefined
+      };
+    }
+
+    // Update state.data via updater fn and re-render. Bumps dataModifiedAt.
+    let saveTimer = null;
+    function setData(updater) {
+      const next = typeof updater === 'function' ? updater(state.data) : updater;
+      next.dataModifiedAt = new Date().toISOString();
+      state.data = next;
+      scheduleSave();
+      render();
+    }
+
+    function scheduleSave() {
+      if (saveTimer) clearTimeout(saveTimer);
+      state.saving = true;
+      paintSaveIndicator();
+      saveTimer = setTimeout(() => {
+        saveData(state.data);
+        state.saving = false;
+        paintSaveIndicator();
+      }, 600);
+    }
+
+    // Flush any pending save synchronously (for beforeunload in future sync stage)
+    function flushSave() {
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      saveData(state.data);
+      state.saving = false;
+    }
+    window.addEventListener('beforeunload', flushSave);
+
+    // Patch the sidebar save indicator in place (avoids re-render flashing)
+    function paintSaveIndicator() {
+      document.querySelectorAll('[data-save-dot]').forEach(el => {
+        el.className = `w-1.5 h-1.5 rounded-full ${state.saving ? 'bg-amber-500' : 'bg-emerald-600'}`;
+      });
+      document.querySelectorAll('[data-save-label]').forEach(el => {
+        el.textContent = state.saving ? 'Saving…' : 'All changes saved';
+      });
+    }
+
+    // ============ Icons (lucide paths) ============
+    const ICON_PATHS = {
+      download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+      upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
+      plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+      minus: '<path d="M5 12h14"/>',
+      trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
+      pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+      check: '<polyline points="20 6 9 17 4 12"/>',
+      x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+      settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+      clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+      chevronDown: '<path d="m6 9 6 6 6-6"/>',
+      banknote: '<rect width="20" height="12" x="2" y="6" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/>',
+      receipt: '<path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 17.5v-11"/>',
+      handCoins: '<path d="M11 15h2a2 2 0 1 0 0-4h-3c-.6 0-1.1.2-1.4.6L3 17"/><path d="m7 21 1.6-1.4c.3-.4.8-.6 1.4-.6h4c1.1 0 2.1-.4 2.8-1.2l4.6-4.4a2 2 0 0 0-2.75-2.91l-4.2 3.9"/><path d="m2 16 6 6"/><circle cx="16" cy="9" r="2.9"/><circle cx="6" cy="5" r="3"/>',
+      layoutDashboard: '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+      sparkles: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .963L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>',
+      arrowUpRight: '<path d="M7 7h10v10"/><path d="M7 17 17 7"/>',
+      arrowDownRight: '<path d="m7 7 10 10"/><path d="M17 7v10H7"/>',
+      fileText: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/>',
+      printer: '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V2h12v7"/><rect width="12" height="8" x="6" y="14"/>',
+      calculator: '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>'
+    };
+    function icon(name, size = 16, extraClass = '') {
+      const path = ICON_PATHS[name] || '';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${extraClass}">${path}</svg>`;
+    }
+
+    // ============ UI Primitives (as HTML string builders) ============
+    // All primitives take a data-* attribute set so events can be delegated.
+
+    const shadowCard = 'box-shadow: 0 1px 2px rgba(60, 50, 35, 0.03), 0 0 0 1px rgba(60, 50, 35, 0.05);';
+    const shadowField = 'box-shadow: 0 1px 2px rgba(60, 50, 35, 0.04), 0 0 0 1px rgba(60, 50, 35, 0.06);';
+    const shadowDropdown = 'box-shadow: 0 12px 32px -8px rgba(60, 50, 35, 0.15), 0 0 0 1px rgba(60, 50, 35, 0.06);';
+
+    // Card: <div> wrapper with white bg + subtle shadow.
+    function card(inner, className = '', style = '') {
+      return `<div class="bg-white rounded-3xl ${className}" style="${shadowCard}${style}">${inner}</div>`;
+    }
+
+    // Label: small uppercase tracker.
+    function label(text, className = '') {
+      return `<label class="block text-[11px] font-medium tracking-[0.1em] uppercase text-stone-500 mb-1.5 ${className}">${esc(text)}</label>`;
+    }
+
+    // TextField. Uncontrolled by default — data-field=<key> lets handlers read it by selector.
+    function textField({ id = '', value = '', placeholder = '', type = 'text', className = '', field = '', autofocus = false }) {
+      const idAttr = id ? ` id="${attr(id)}"` : '';
+      const fieldAttr = field ? ` data-field="${attr(field)}"` : '';
+      const af = autofocus ? ' autofocus' : '';
+      const ph = placeholder ? ` placeholder="${attr(placeholder)}"` : '';
+      const v = value == null ? '' : value;
+      return `<input${idAttr}${fieldAttr} type="${attr(type)}" value="${attr(v)}"${ph}${af}
+        class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 placeholder:text-stone-400 focus:outline-none transition-all ${className}"
+        style="${shadowField}" />`;
+    }
+
+    // NumberField with +/- buttons. The input is a standard <input type="number">;
+    // inc/dec buttons dispatch a step via data-action="num-step" and data-target="<id>".
+    function numberField({ id = '', value = '', field = '', prefix = '$', step = 1, placeholder = '0.00', className = '' }) {
+      const idAttr = id ? ` id="${attr(id)}"` : '';
+      const fieldAttr = field ? ` data-field="${attr(field)}"` : '';
+      return `<div class="flex items-center bg-white rounded-2xl overflow-hidden ${className}" style="${shadowField}">
+        <button type="button" tabindex="-1" data-action="num-step" data-target="${attr(id)}" data-delta="${-step}"
+          class="px-3 py-2.5 text-stone-400 hover:text-stone-900 hover:bg-stone-50 transition-colors">${icon('minus', 14)}</button>
+        <div class="flex-1 flex items-center gap-1 px-2 min-w-0">
+          ${prefix ? `<span class="text-stone-400 text-sm">${esc(prefix)}</span>` : ''}
+          <input${idAttr}${fieldAttr} type="number" step="0.01" value="${attr(value)}" placeholder="${attr(placeholder)}"
+            class="w-full py-2.5 text-sm bg-transparent focus:outline-none text-stone-900 tabular-nums font-mono" />
+        </div>
+        <button type="button" tabindex="-1" data-action="num-step" data-target="${attr(id)}" data-delta="${step}"
+          class="px-3 py-2.5 text-stone-400 hover:text-stone-900 hover:bg-stone-50 transition-colors">${icon('plus', 14)}</button>
+      </div>`;
+    }
+
+    // Button. `action` / extra data-* attrs are passed via `dataAttrs` object.
+    function button({ children, variant = 'primary', size = 'md', className = '', disabled = false, title = '', action = '', dataAttrs = {} }) {
+      const sizes = { sm: 'px-3.5 py-2 text-xs', md: 'px-4 py-2.5 text-sm', lg: 'px-5 py-3 text-sm' };
+      const variants = {
+        primary: 'bg-stone-900 text-stone-50 hover:bg-stone-800 active:scale-[0.98]',
+        secondary: 'bg-white text-stone-800 hover:bg-stone-50',
+        accent: 'text-stone-50 active:scale-[0.98]',
+        ghost: 'text-stone-600 hover:text-stone-900 hover:bg-stone-100',
+        danger: 'bg-white text-red-700 hover:bg-red-50'
+      };
+      let style = '';
+      if (variant === 'secondary' || variant === 'danger') style = shadowField;
+      else if (variant === 'accent') style = 'background-color: #7d9d7a; box-shadow: 0 1px 2px rgba(125, 157, 122, 0.2);';
+      const data = Object.entries(dataAttrs).map(([k, v]) => `data-${attr(k)}="${attr(v)}"`).join(' ');
+      const actAttr = action ? ` data-action="${attr(action)}"` : '';
+      const titleAttr = title ? ` title="${attr(title)}"` : '';
+      const disAttr = disabled ? ' disabled' : '';
+      return `<button type="button"${actAttr} ${data}${titleAttr}${disAttr} style="${style}"
+        class="inline-flex items-center justify-center gap-2 rounded-2xl font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed ${sizes[size]} ${variants[variant]} ${className}">${children}</button>`;
+    }
+
+    // Custom dropdown. `options` = [{value, label}]. `id` identifies this dropdown instance
+    // so outside-click and keyboard handlers know which one is open. `action` is dispatched
+    // with data-value=<chosen> on selection.
+    function dropdown({ id, value, options, placeholder = 'Select', className = '', align = 'left', action }) {
+      const selected = options.find(o => o.value === value);
+      const selLabel = selected ? selected.label : placeholder;
+      const open = state.openDropdown === id;
+      const menu = open ? `
+        <div class="dropdown-menu absolute z-50 mt-2 min-w-full bg-white rounded-2xl py-1.5 overflow-hidden ${align === 'right' ? 'right-0' : 'left-0'}"
+          style="${shadowDropdown}">
+          ${options.map(o => {
+            const active = o.value === value;
+            return `<button type="button" data-action="${attr(action)}" data-dropdown-id="${attr(id)}" data-value="${attr(o.value)}"
+              class="w-full text-left px-4 py-2.5 text-sm flex items-center justify-between gap-3 transition-colors ${active ? 'bg-stone-50 text-stone-900' : 'text-stone-700 hover:bg-stone-50'}">
+              <span class="whitespace-nowrap">${esc(o.label)}</span>
+              ${active ? icon('check', 14, 'text-stone-900') : ''}
+            </button>`;
+          }).join('')}
+        </div>` : '';
+      return `<div data-dropdown="${attr(id)}" class="relative ${className}">
+        <button type="button" data-action="toggle-dropdown" data-dropdown-id="${attr(id)}"
+          class="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-sm bg-white rounded-2xl hover:bg-stone-50 transition-colors"
+          style="${shadowField}">
+          <span class="${selected ? 'text-stone-900' : 'text-stone-400'}">${esc(selLabel)}</span>
+          ${icon('chevronDown', 15, `text-stone-500 transition-transform duration-200 ${open ? 'rotate-180' : ''}`)}
+        </button>
+        ${menu}
+      </div>`;
+    }
+
+    // Helper: read value from a form input by its data-field attribute,
+    // scoped to a containing element (e.g., the add-entry form).
+    function readField(root, name) {
+      const el = root.querySelector(`[data-field="${name}"]`);
+      return el ? el.value : '';
+    }
+
+    // ============ Layout shell (sidebar + bottom tabs + period selector) ============
+    const TABS = [
+      { id: 'overview',    label: 'Overview',    icon: 'layoutDashboard' },
+      { id: 'expenses',    label: 'Expenses',    icon: 'receipt' },
+      { id: 'income',      label: 'Income',      icon: 'banknote' },
+      { id: 'uncollected', label: 'Uncollected', icon: 'clock' },
+      { id: 'loans',       label: 'Loans',       icon: 'handCoins' },
+      { id: 'tax',         label: 'Tax',         icon: 'calculator' },
+      { id: 'settings',    label: 'Settings',    icon: 'settings' }
+    ];
+
+    // Mobile bottom bar shows a slimmed-down set; the rest are reachable via More (Settings covers it).
+    const MOBILE_TABS = ['overview', 'expenses', 'income', 'tax', 'settings'];
+
+    // Which tabs show the month/FY period selector in the header.
+    const PERIOD_TABS = new Set(['overview', 'expenses', 'income', 'tax']);
+
+    function sidebar() {
+      const nav = TABS.map(t => {
+        const active = state.tab === t.id;
+        const gstPill = (t.id === 'tax' && state.data.settings.gstEnabled)
+          ? `<span class="ml-auto text-[9px] tracking-[0.1em] uppercase font-semibold px-1.5 py-0.5 rounded-md" style="background-color:#edf3ec; color:#5a7d57;">GST</span>`
+          : '';
+        return `<button data-action="tab" data-tab="${t.id}"
+          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-2xl text-sm font-medium transition-all ${active ? 'bg-white text-stone-900' : 'text-stone-600 hover:text-stone-900 hover:bg-white/40'}"
+          style="${active ? 'box-shadow: 0 1px 2px rgba(60, 50, 35, 0.05);' : ''}">
+          ${icon(t.icon, 15)}<span>${esc(t.label)}</span>${gstPill}
+        </button>`;
+      }).join('');
+      return `<aside class="hidden md:flex fixed top-0 left-0 h-screen w-[220px] flex-col p-4 z-20 no-print" style="background-color:#ebe4d8;">
+        <div class="flex items-center gap-2.5 px-2 pt-2 pb-6">
+          <div class="w-9 h-9 rounded-xl flex items-center justify-center" style="background-color:#2d2924;">
+            <span class="font-serif text-lg italic text-stone-50 leading-none">V</span>
+          </div>
+          <div>
+            <div class="font-serif text-base font-medium leading-tight text-stone-900">Ventra</div>
+            <div class="text-[10px] tracking-[0.1em] text-stone-500 uppercase">Ledger</div>
+          </div>
+        </div>
+        <nav class="flex-1 space-y-1">${nav}</nav>
+        <div class="pt-4 border-t" style="border-color:#d6ccbe;">
+          <div class="flex items-center gap-2 px-3 py-2 text-xs text-stone-500">
+            <div data-save-dot class="w-1.5 h-1.5 rounded-full ${state.saving ? 'bg-amber-500' : 'bg-emerald-600'}"></div>
+            <span data-save-label>${state.saving ? 'Saving…' : 'All changes saved'}</span>
+          </div>
+          <div class="px-3 py-1.5 text-[11px] text-stone-400 tracking-[0.05em]">
+            ${esc(state.data.settings.partnerA)} &amp; ${esc(state.data.settings.partnerB)}
+          </div>
+        </div>
+      </aside>`;
+    }
+
+    function bottomTabs() {
+      const buttons = MOBILE_TABS.map(id => {
+        const t = TABS.find(x => x.id === id);
+        const active = state.tab === id;
+        const gstDot = (id === 'tax' && state.data.settings.gstEnabled)
+          ? `<span class="absolute top-1 right-3 w-1.5 h-1.5 rounded-full" style="background-color:#5a7d57;"></span>` : '';
+        return `<button data-action="tab" data-tab="${t.id}"
+          class="relative flex-1 flex flex-col items-center justify-center gap-1 py-2 text-[10px] tracking-[0.05em] font-medium transition-colors ${active ? 'text-stone-900' : 'text-stone-500'}">
+          ${gstDot}${icon(t.icon, 18)}<span>${esc(t.label)}</span>
+        </button>`;
+      }).join('');
+      return `<nav class="md:hidden fixed bottom-0 left-0 right-0 z-30 flex pb-safe no-print"
+        style="background-color: rgba(235, 228, 216, 0.95); backdrop-filter: blur(12px); border-top: 1px solid #d6ccbe;">
+        ${buttons}
+      </nav>`;
+    }
+
+    function periodSelector() {
+      if (!PERIOD_TABS.has(state.tab)) return '';
+      const modeToggle = `
+        <div class="inline-flex rounded-2xl p-1 bg-white" style="${shadowField}">
+          ${['month','fy'].map(m => {
+            const active = state.period === m;
+            return `<button data-action="set-period-mode" data-mode="${m}"
+              class="px-3 py-1.5 text-xs font-medium rounded-xl transition-all ${active ? 'bg-stone-900 text-stone-50' : 'text-stone-600 hover:text-stone-900'}">
+              ${m === 'month' ? 'Month' : 'FY'}
+            </button>`;
+          }).join('')}
+        </div>`;
+
+      // Build period picker options
+      let picker;
+      if (state.period === 'month') {
+        const set = new Set([state.currentMonth,
+          ...state.data.expenses.map(e => monthKey(e.date)),
+          ...state.data.income.map(i => monthKey(i.date))].filter(Boolean));
+        const opts = [...set].sort().reverse().map(m => {
+          const [y, mo] = m.split('-');
+          return { value: m, label: `${MONTHS_FULL[Number(mo)-1]} ${y}` };
+        });
+        picker = dropdown({ id: 'period-picker', value: state.currentMonth, options: opts, action: 'pick-month', align: 'right', className: 'min-w-[180px]' });
+      } else {
+        const fySet = new Set([state.currentFY,
+          ...state.data.expenses.map(e => fyFromISO(e.date)),
+          ...state.data.income.map(i => fyFromISO(i.date))].filter(Boolean));
+        const opts = [...fySet].sort().reverse().map(n => ({ value: String(n), label: `FY${n}` }));
+        picker = dropdown({ id: 'period-picker', value: String(state.currentFY), options: opts, action: 'pick-fy', align: 'right', className: 'min-w-[140px]' });
+      }
+
+      return `<div class="sticky top-0 z-10 px-4 md:px-8 py-4 flex items-center justify-end gap-3 no-print"
+        style="background-color: rgba(245, 239, 230, 0.85); backdrop-filter: blur(12px);">
+        <span class="text-[11px] tracking-[0.1em] uppercase text-stone-500 hidden sm:inline">Viewing</span>
+        ${modeToggle}
+        ${picker}
+      </div>`;
+    }
+
+    // Main layout. `content` is the HTML string of the current tab's view.
+    function layout(content) {
+      const showPeriod = PERIOD_TABS.has(state.tab);
+      return `
+        <div class="flex min-h-screen" style="background-color:#f5efe6;">
+          ${sidebar()}
+          <main class="flex-1 md:ml-[220px] pb-20 md:pb-0">
+            ${periodSelector()}
+            <div class="px-4 md:px-8 ${showPeriod ? 'pb-10 pt-2' : 'py-10'}">
+              ${content}
+            </div>
+          </main>
+          ${bottomTabs()}
+        </div>`;
+    }
+
+    // ============ Views (to be filled in) ============
+    // ============ Overview ============
+    // Returns the list of months in the active period (6 for month view, 12 for FY view)
+    // Each entry: { key: 'YYYY-MM', label: 'Jun', e: <expenses total>, inc: <income total>, active: bool }
+    function trendBuckets() {
+      const { expenses, income } = state.data;
+      const buckets = [];
+      if (state.period === 'month') {
+        const [yy, mm] = state.currentMonth.split('-').map(Number);
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(yy, mm - 1 - i, 1);
+          const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+          const e = expenses.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
+          const inc = income.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
+          buckets.push({ key, label: MONTHS_SHORT[d.getMonth()], e, inc, active: key === state.currentMonth });
+        }
+      } else {
+        // 12-month FY strip (Jul .. Jun)
+        const n = state.currentFY;
+        for (let i = 0; i < 12; i++) {
+          // month 0..11 maps to Jul..Jun of FY n
+          const month = (6 + i) % 12; // Jul = 6
+          const year = (i < 6) ? n - 1 : n;
+          const key = `${year}-${String(month+1).padStart(2,'0')}`;
+          const e = expenses.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
+          const inc = income.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
+          buckets.push({ key, label: MONTHS_SHORT[month], e, inc, active: false });
+        }
+      }
+      return buckets;
+    }
+
+    function viewOverview() {
+      const { expenses, income, uncollected, loans, settings } = state.data;
+      const cur = settings.currency;
+
+      const inPeriod = (iso) => state.period === 'month'
+        ? monthKey(iso) === state.currentMonth
+        : isoInFY(iso, state.currentFY);
+
+      const periodExpenses = expenses.filter(e => inPeriod(e.date));
+      const periodIncome   = income.filter(i => inPeriod(i.date));
+
+      const totalExp = periodExpenses.reduce((s, e) => s + parseAmount(e.amount), 0);
+      const totalInc = periodIncome.reduce((s, i) => s + parseAmount(i.amount), 0);
+      const net = totalInc - totalExp;
+
+      const shareA = net * (settings.splitA / 100);
+      const shareB = net * (settings.splitB / 100);
+
+      const totalUncollected = uncollected.filter(u => !u.collected).reduce((s, u) => s + parseAmount(u.amount), 0);
+      const totalLoans = loans.reduce((s, l) => s + parseAmount(l.amount) * (l.direction === 'in' ? -1 : 1), 0);
+
+      const trend = trendBuckets();
+      const maxTrend = Math.max(1, ...trend.map(m => Math.max(m.e, m.inc)));
+
+      const periodLabel = state.period === 'month'
+        ? (() => { const [y, m] = state.currentMonth.split('-').map(Number); return `${MONTHS_FULL[m-1]} ${y}`; })()
+        : `FY${state.currentFY}`;
+
+      const recent = [
+        ...periodExpenses.map(x => ({ ...x, _type: 'expense' })),
+        ...periodIncome.map(x => ({ ...x, _type: 'income' }))
+      ].sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 6);
+
+      const expPct = totalInc > 0 ? Math.min(100, (totalExp / totalInc) * 100) : 0;
+
+      const summaryRow = `
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          ${card(`
+            <div class="flex items-center gap-2 mb-4">
+              <div class="w-8 h-8 rounded-xl flex items-center justify-center" style="background-color:#edf3ec; color:#5a7d57;">
+                ${icon('arrowDownRight', 15)}
+              </div>
+              <span class="text-[11px] tracking-[0.1em] uppercase text-stone-500">Income in</span>
+            </div>
+            <div class="text-[32px] font-medium text-stone-900 tabular-nums leading-none font-mono">${esc(fmt(totalInc, cur))}</div>
+            <div class="text-xs text-stone-500 mt-2">${periodIncome.length} ${periodIncome.length === 1 ? 'entry' : 'entries'}</div>
+          `, 'p-6')}
+          ${card(`
+            <div class="flex items-center gap-2 mb-4">
+              <div class="w-8 h-8 rounded-xl flex items-center justify-center" style="background-color:#f5ede8; color:#a06e4e;">
+                ${icon('arrowUpRight', 15)}
+              </div>
+              <span class="text-[11px] tracking-[0.1em] uppercase text-stone-500">Expenses out</span>
+            </div>
+            <div class="text-[32px] font-medium text-stone-900 tabular-nums leading-none font-mono">${esc(fmt(totalExp, cur))}</div>
+            <div class="text-xs text-stone-500 mt-2">${periodExpenses.length} ${periodExpenses.length === 1 ? 'charge' : 'charges'}</div>
+          `, 'p-6')}
+          ${card(`
+            <div class="flex items-center gap-2 mb-4">
+              <div class="w-8 h-8 rounded-xl flex items-center justify-center" style="background-color: rgba(245, 239, 230, 0.1); color: #d6ccbe;">
+                ${icon('sparkles', 15)}
+              </div>
+              <span class="text-[11px] tracking-[0.1em] uppercase text-stone-400">Net profit</span>
+            </div>
+            <div class="text-[32px] font-medium tabular-nums leading-none font-mono ${net >= 0 ? 'text-stone-50' : 'text-red-300'}">
+              ${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), cur))}
+            </div>
+            <div class="text-xs text-stone-400 mt-2">${state.period === 'month' ? 'After expenses this month' : 'After expenses this FY'}</div>
+          `, 'p-6', 'background: linear-gradient(135deg, #2d2924 0%, #1f1c18 100%);')}
+        </div>`;
+
+      const splitCard = card(`
+        <div class="flex items-start justify-between gap-4 mb-5">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Partner split</div>
+            <h2 class="font-serif text-2xl font-light text-stone-900">${state.period === 'month' ? 'End of month distribution' : 'End of FY distribution'}</h2>
+          </div>
+          <div class="text-xs text-stone-500 text-right"><div>${settings.splitA}% / ${settings.splitB}%</div></div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          ${[{ name: settings.partnerA, share: shareA, pct: settings.splitA },
+             { name: settings.partnerB, share: shareB, pct: settings.splitB }].map(p => `
+            <div class="rounded-2xl p-5" style="background-color:#f5efe6;">
+              <div class="flex items-center gap-2.5 mb-3">
+                <div class="w-9 h-9 rounded-full flex items-center justify-center text-stone-50 text-sm font-medium" style="background-color:#2d2924;">
+                  ${esc((p.name || '?').slice(0,1).toUpperCase())}
+                </div>
+                <div>
+                  <div class="text-sm font-medium text-stone-900">${esc(p.name)}</div>
+                  <div class="text-[11px] text-stone-500">${p.pct}% share</div>
+                </div>
+              </div>
+              <div class="text-2xl font-medium tabular-nums font-mono ${p.share >= 0 ? 'text-stone-900' : 'text-red-700'}">
+                ${p.share >= 0 ? '' : '-'}${esc(fmt(Math.abs(p.share), cur))}
+              </div>
+            </div>`).join('')}
+        </div>
+        ${totalInc > 0 ? `
+          <div class="mt-5">
+            <div class="flex items-center justify-between text-[11px] tracking-[0.05em] uppercase text-stone-500 mb-2">
+              <span>Costs as share of income</span>
+              <span>${expPct.toFixed(0)}%</span>
+            </div>
+            <div class="h-2 rounded-full overflow-hidden" style="background-color:#eee5d5;">
+              <div class="h-full rounded-full transition-all duration-700" style="width:${expPct}%; background-color:${expPct > 80 ? '#c47474' : '#a0896b'};"></div>
+            </div>
+          </div>` : ''}
+      `, 'p-6');
+
+      const trendCard = card(`
+        <div class="flex items-center justify-between mb-5">
+          <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500">${state.period === 'month' ? 'Six month trend' : 'Twelve month trend'}</div>
+          <div class="flex items-center gap-4 text-[11px] text-stone-600">
+            <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:#c9b9a1;"></div>Expenses</div>
+            <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:#7d9d7a;"></div>Income</div>
+          </div>
+        </div>
+        <div class="flex items-end gap-2 md:gap-3 h-44 overflow-x-auto no-scrollbar">
+          ${trend.map(m => `
+            <div class="flex-1 min-w-[28px] flex flex-col items-center gap-2">
+              <div class="w-full flex items-end justify-center gap-1 h-36">
+                <div class="w-1/2 rounded-t-lg transition-all duration-500" style="height:${(m.e / maxTrend) * 100}%; min-height:${m.e > 0 ? '3px' : '0'}; background-color:#c9b9a1;" title="Expenses: ${esc(fmt(m.e, cur))}"></div>
+                <div class="w-1/2 rounded-t-lg transition-all duration-500" style="height:${(m.inc / maxTrend) * 100}%; min-height:${m.inc > 0 ? '3px' : '0'}; background-color:#7d9d7a;" title="Income: ${esc(fmt(m.inc, cur))}"></div>
+              </div>
+              <div class="text-[11px] ${m.active ? 'text-stone-900 font-medium' : 'text-stone-500'}">${esc(m.label)}</div>
+            </div>`).join('')}
+        </div>
+      `, 'lg:col-span-2 p-6');
+
+      const tilesCol = `
+        <div class="space-y-4">
+          ${card(`
+            <div class="flex items-center gap-2 mb-3">
+              <div class="w-7 h-7 rounded-xl flex items-center justify-center text-stone-600" style="background-color:#f5efe6;">${icon('clock', 13)}</div>
+              <span class="text-[11px] tracking-[0.1em] uppercase text-stone-500">Uncollected</span>
+            </div>
+            <div class="text-xl font-medium text-stone-900 tabular-nums font-mono">${esc(fmt(totalUncollected, cur))}</div>
+            <div class="text-xs text-stone-500 mt-1">${uncollected.filter(u => !u.collected).length} pending</div>
+          `, 'p-5')}
+          ${card(`
+            <div class="flex items-center gap-2 mb-3">
+              <div class="w-7 h-7 rounded-xl flex items-center justify-center text-stone-600" style="background-color:#f5efe6;">${icon('handCoins', 13)}</div>
+              <span class="text-[11px] tracking-[0.1em] uppercase text-stone-500">Loan balance</span>
+            </div>
+            <div class="text-xl font-medium tabular-nums font-mono ${totalLoans >= 0 ? 'text-stone-900' : 'text-emerald-800'}">
+              ${totalLoans >= 0 ? '' : '-'}${esc(fmt(Math.abs(totalLoans), cur))}
+            </div>
+            <div class="text-xs text-stone-500 mt-1">${loans.length} entries</div>
+          `, 'p-5')}
+        </div>`;
+
+      const recentCard = recent.length === 0 ? '' : card(`
+        <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-4">Recent activity</div>
+        <div class="space-y-0 divide-y" style="border-color:#f0ece3;">
+          ${recent.map(item => {
+            const edited = item.editedBy || item.editedAt
+              ? `<span class="text-[10px] text-stone-400 ml-2">· ${esc(item.editedBy || '')}${item.editedBy && item.editedAt ? ' · ' : ''}${esc(relTime(item.editedAt))}</span>`
+              : '';
+            return `<div class="flex items-center justify-between py-3 first:pt-0 last:pb-0">
+              <div class="flex items-center gap-3">
+                <div class="w-2 h-2 rounded-full" style="background-color:${item._type === 'income' ? '#7d9d7a' : '#c9b9a1'};"></div>
+                <div>
+                  <div class="text-sm text-stone-900">${esc(item.vendor || item.source || '')}</div>
+                  <div class="text-xs text-stone-500">${esc(fmtDate(item.date))}${item.notes ? ' · ' + esc(item.notes) : ''}${edited}</div>
+                </div>
+              </div>
+              <div class="tabular-nums text-sm font-medium font-mono ${item._type === 'income' ? 'text-emerald-800' : 'text-stone-900'}">
+                ${item._type === 'income' ? '+' : ''}${esc(fmt(parseAmount(item.amount), cur))}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      `, 'p-6');
+
+      return `
+        <div class="space-y-6">
+          <div>
+            <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">Summary for</div>
+            <h1 class="font-serif text-4xl md:text-5xl font-light text-stone-900 leading-[1.05]">${esc(periodLabel)}</h1>
+          </div>
+          ${summaryRow}
+          ${splitCard}
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            ${trendCard}
+            ${tilesCol}
+          </div>
+          ${recentCard}
+        </div>`;
+    }
+    // ============ LedgerTab (Expenses + Income) ============
+    function ledgerMeta(kind) {
+      const isExpense = kind === 'expense';
+      return {
+        isExpense,
+        listKey: isExpense ? 'expenses' : 'income',
+        nameField: isExpense ? 'vendor' : 'source',
+        nameLabel: isExpense ? 'Vendor' : 'Source',
+        title: isExpense ? 'Expenses' : 'Income',
+        helpText: isExpense
+          ? 'Everything coming out of the business account.'
+          : 'Monthly Stripe payouts and any other income.',
+        addLabel: isExpense ? 'expense' : 'income'
+      };
+    }
+
+    function viewLedger(kind) {
+      const M = ledgerMeta(kind);
+      const { isExpense, listKey, nameField, nameLabel, title, helpText, addLabel } = M;
+      const list = state.data[listKey];
+      const { currency, gstEnabled, gstRate } = state.data.settings;
+      const filterKey = isExpense ? 'filterExpense' : 'filterIncome';
+      const sortKey   = isExpense ? 'sortExpense'   : 'sortIncome';
+      const filter = state[filterKey];
+      const sortBy = state[sortKey];
+
+      // Build filter options — in month mode: All + each month seen in data.
+      // In FY mode: All + each FY seen in data.
+      let filterOptions;
+      if (state.period === 'month') {
+        const set = new Set(list.map(x => monthKey(x.date)).filter(Boolean));
+        filterOptions = [{ value: 'all', label: 'All months' }, ...[...set].sort().reverse().map(m => {
+          const [y, mo] = m.split('-');
+          return { value: m, label: `${MONTHS_FULL[Number(mo)-1]} ${y}` };
+        })];
+      } else {
+        const set = new Set(list.map(x => fyFromISO(x.date)).filter(Boolean));
+        filterOptions = [{ value: 'all', label: 'All FY' }, ...[...set].sort((a,b)=>b-a).map(n => ({ value: `FY${n}`, label: `FY${n}` }))];
+      }
+
+      // Apply filter + sort
+      let filtered = [...list];
+      if (filter !== 'all') {
+        if (state.period === 'month') {
+          filtered = filtered.filter(x => monthKey(x.date) === filter);
+        } else {
+          const fyNum = Number(filter.replace(/^FY/, ''));
+          filtered = filtered.filter(x => fyFromISO(x.date) === fyNum);
+        }
+      }
+      filtered.sort((a, b) => {
+        let av = a[sortBy.field], bv = b[sortBy.field];
+        if (sortBy.field === 'amount') { av = parseAmount(av); bv = parseAmount(bv); }
+        if (av < bv) return sortBy.dir === 'asc' ? -1 : 1;
+        if (av > bv) return sortBy.dir === 'asc' ? 1 : -1;
+        return 0;
+      });
+
+      const totalFiltered = filtered.reduce((s, x) => s + parseAmount(x.amount), 0);
+      const arrow = (field) => sortBy.field === field ? (sortBy.dir === 'asc' ? ' ↑' : ' ↓') : '';
+
+      // Add form
+      const categoryOpts = EXPENSE_CATEGORIES.map(c => ({ value: c, label: c }));
+      const gstChecked = gstEnabled ? `
+        <div class="md:col-span-2">
+          ${label('GST incl.')}
+          <label class="flex items-center gap-2 px-4 py-2.5 text-sm bg-white rounded-2xl cursor-pointer" style="${shadowField}">
+            <input type="checkbox" data-field="gstInclusive" class="accent-stone-900" />
+            <span class="text-stone-700 text-xs">${gstRate}%</span>
+          </label>
+        </div>` : '';
+
+      const addForm = card(`
+        <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-3">Add ${esc(addLabel)}</div>
+        <form data-add-form="${kind}" class="grid grid-cols-1 md:grid-cols-12 gap-3" onsubmit="return false;">
+          <div class="md:col-span-${isExpense ? 3 : 4}">
+            ${label(nameLabel)}
+            ${textField({ value: '', field: nameField, placeholder: isExpense ? 'e.g. ElevenLabs' : 'e.g. Stripe payout' })}
+          </div>
+          ${isExpense ? `
+          <div class="md:col-span-${gstEnabled ? 2 : 3}">
+            ${label('Category')}
+            <select data-field="category" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
+              <option value="">—</option>
+              ${EXPENSE_CATEGORIES.map(c => `<option value="${attr(c)}">${esc(c)}</option>`).join('')}
+            </select>
+          </div>` : ''}
+          <div class="md:col-span-2">
+            ${label('Date')}
+            ${textField({ type: 'date', value: todayISO(), field: 'date' })}
+          </div>
+          <div class="md:col-span-${isExpense ? 2 : 3}">
+            ${label('Amount')}
+            ${numberField({ id: `add-${kind}-amount`, field: 'amount' })}
+          </div>
+          ${isExpense && gstEnabled ? gstChecked : ''}
+          <div class="md:col-span-${isExpense ? (gstEnabled ? 2 : 3) : 2}">
+            ${label('Notes')}
+            ${textField({ value: '', field: 'notes', placeholder: 'Optional' })}
+          </div>
+          <div class="md:col-span-1 flex items-end">
+            ${button({ children: icon('plus', 14), action: 'add-entry', dataAttrs: { kind }, className: 'w-full' })}
+          </div>
+        </form>
+      `, 'p-5');
+
+      // Filter + total row
+      const filterRow = `
+        <div class="flex items-center justify-between flex-wrap gap-3">
+          <div class="flex items-center gap-3">
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500">Showing</div>
+            ${dropdown({ id: `filter-${kind}`, value: filter, options: filterOptions, action: 'set-filter', className: 'min-w-[170px]' })}
+          </div>
+          <div class="text-right">
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-0.5">Total</div>
+            <div class="text-xl font-medium tabular-nums font-mono ${isExpense ? 'text-stone-900' : 'text-emerald-800'}">${esc(fmt(totalFiltered, currency))}</div>
+          </div>
+        </div>`;
+
+      // Table
+      const table = filtered.length === 0
+        ? `<div class="p-14 text-center text-stone-500 text-sm">No ${esc(addLabel)} entries yet. Add one above or import a CSV.</div>`
+        : `<div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid #f0ece3;">
+                <th class="text-left font-medium px-4 md:px-6 py-4 cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="${nameField}">${esc(nameLabel)}${arrow(nameField)}</th>
+                ${isExpense ? `<th class="text-left font-medium px-4 md:px-6 py-4 hidden md:table-cell cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="category">Category${arrow('category')}</th>` : ''}
+                <th class="text-left font-medium px-4 md:px-6 py-4 cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="date">Date${arrow('date')}</th>
+                <th class="text-right font-medium px-4 md:px-6 py-4 cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="amount">Amount${arrow('amount')}</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 hidden lg:table-cell">Notes</th>
+                <th class="w-20"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtered.map(item => ledgerRow(item, M)).join('')}
+            </tbody>
+          </table>
+        </div>`;
+
+      return `
+        <div class="space-y-6">
+          <div class="flex items-end justify-between flex-wrap gap-4">
+            <div>
+              <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">${isExpense ? 'Money out' : 'Money in'}</div>
+              <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">${esc(title)}</h1>
+              <p class="text-sm text-stone-500 mt-2">${esc(helpText)}</p>
+            </div>
+            <div class="flex gap-2">
+              <input type="file" accept=".csv" class="hidden" data-csv-input="${kind}" />
+              ${button({ children: `${icon('upload', 14)} Import`, variant: 'secondary', size: 'sm', action: 'csv-import', dataAttrs: { kind } })}
+              ${button({ children: `${icon('download', 14)} Export`, variant: 'secondary', size: 'sm', action: 'csv-export', dataAttrs: { kind }, disabled: filtered.length === 0 })}
+            </div>
+          </div>
+          ${addForm}
+          ${filterRow}
+          ${card(table, 'overflow-hidden')}
+        </div>`;
+    }
+
+    function ledgerRow(item, M) {
+      const { isExpense, nameField } = M;
+      const { currency, gstEnabled } = state.data.settings;
+      const editing = state.editingId === item.id;
+      const editedStamp = (item.editedBy || item.editedAt)
+        ? `<div class="text-[10px] text-stone-400 mt-0.5">edited${item.editedBy ? ' by ' + esc(item.editedBy) : ''}${item.editedAt ? ' · ' + esc(relTime(item.editedAt)) : ''}</div>`
+        : '';
+
+      if (editing) {
+        return `<tr data-edit-row="${item.id}" style="background-color:#f7f3eb; border-bottom: 1px solid #f0ece3;">
+          <td class="px-4 md:px-6 py-2.5">${textField({ value: item[nameField] || '', field: nameField })}</td>
+          ${isExpense ? `<td class="px-4 md:px-6 py-2.5 hidden md:table-cell">
+            <select data-field="category" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
+              <option value="">—</option>
+              ${EXPENSE_CATEGORIES.map(c => `<option value="${attr(c)}"${item.category === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+            </select>
+          </td>` : ''}
+          <td class="px-4 md:px-6 py-2.5">${textField({ type: 'date', value: item.date, field: 'date' })}</td>
+          <td class="px-4 md:px-6 py-2.5">${numberField({ id: `edit-amount-${item.id}`, value: String(item.amount || ''), field: 'amount' })}</td>
+          <td class="px-4 md:px-6 py-2.5 hidden lg:table-cell">${textField({ value: item.notes || '', field: 'notes' })}</td>
+          <td class="px-4 md:px-6 py-2.5">
+            <div class="flex gap-1 justify-end">
+              <button data-action="save-edit" data-kind="${M.isExpense ? 'expense' : 'income'}" data-id="${item.id}" class="p-2 rounded-xl text-stone-700 hover:bg-stone-200 transition-colors" title="Save">${icon('check', 14)}</button>
+              <button data-action="cancel-edit" class="p-2 rounded-xl text-stone-500 hover:bg-stone-200 transition-colors" title="Cancel">${icon('x', 14)}</button>
+            </div>
+          </td>
+        </tr>`;
+      }
+
+      return `<tr class="group hover:bg-stone-50 transition-colors" style="border-bottom: 1px solid #f0ece3;">
+        <td class="px-4 md:px-6 py-4 text-stone-900">
+          <div>${esc(item[nameField] || '')}</div>
+          ${editedStamp}
+        </td>
+        ${isExpense ? `<td class="px-4 md:px-6 py-4 hidden md:table-cell text-stone-600 text-xs">
+          ${item.category ? `<span class="inline-block px-2.5 py-1 rounded-full text-[11px]" style="background-color:#f5efe6; color:#6b5d4f;">${esc(item.category)}</span>` : '—'}
+          ${gstEnabled && item.gstInclusive ? `<span class="ml-1 inline-block px-1.5 py-0.5 rounded-md text-[10px]" style="background-color:#edf3ec; color:#5a7d57;">GST</span>` : ''}
+        </td>` : ''}
+        <td class="px-4 md:px-6 py-4 text-stone-600 tabular-nums text-xs font-mono">${esc(fmtDate(item.date))}</td>
+        <td class="px-4 md:px-6 py-4 text-right tabular-nums font-medium font-mono">${esc(fmt(parseAmount(item.amount), currency))}</td>
+        <td class="px-4 md:px-6 py-4 text-stone-500 text-xs hidden lg:table-cell">${esc(item.notes || '')}</td>
+        <td class="px-4 md:px-6 py-4">
+          <div class="flex gap-1 justify-end md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+            <button data-action="start-edit" data-id="${item.id}" class="p-2 rounded-xl text-stone-600 hover:bg-stone-200 transition-colors" title="Edit">${icon('pencil', 13)}</button>
+            <button data-action="delete-entry" data-kind="${M.isExpense ? 'expense' : 'income'}" data-id="${item.id}" class="p-2 rounded-xl text-red-700 hover:bg-red-50 transition-colors" title="Delete">${icon('trash', 13)}</button>
+          </div>
+        </td>
+      </tr>`;
+    }
+
+    function viewExpenses() { return viewLedger('expense'); }
+    function viewIncome()   { return viewLedger('income');  }
+
+    // ============ Ledger action handlers ============
+    function actAddEntry(kind) {
+      const form = document.querySelector(`[data-add-form="${kind}"]`);
+      if (!form) return;
+      const M = ledgerMeta(kind);
+      const nameVal = (readField(form, M.nameField) || '').trim();
+      const amtVal = parseAmount(readField(form, 'amount'));
+      if (!nameVal || !amtVal) return;
+      const dateVal = readField(form, 'date') || todayISO();
+      const notesVal = readField(form, 'notes') || '';
+      const base = {
+        id: uid(),
+        [M.nameField]: nameVal,
+        date: dateVal,
+        amount: amtVal,
+        notes: notesVal
+      };
+      if (kind === 'expense') {
+        base.category = readField(form, 'category') || '';
+        const gstEl = form.querySelector('[data-field="gstInclusive"]');
+        if (gstEl) base.gstInclusive = gstEl.checked;
+      }
+      const entry = stamp(base);
+      setData(d => ({ ...d, [M.listKey]: [...d[M.listKey], entry] }));
+    }
+
+    function actSaveEdit(kind, id) {
+      const row = document.querySelector(`[data-edit-row="${id}"]`);
+      if (!row) return;
+      const M = ledgerMeta(kind);
+      const patch = {
+        [M.nameField]: (readField(row, M.nameField) || '').trim(),
+        date: readField(row, 'date') || todayISO(),
+        amount: parseAmount(readField(row, 'amount')),
+        notes: readField(row, 'notes') || ''
+      };
+      if (kind === 'expense') patch.category = readField(row, 'category') || '';
+      setData(d => ({ ...d, [M.listKey]: d[M.listKey].map(x => x.id === id ? stamp({ ...x, ...patch }) : x) }));
+      state.editingId = null;
+    }
+
+    function actDeleteEntry(kind, id) {
+      if (!confirm('Delete this entry?')) return;
+      const M = ledgerMeta(kind);
+      setData(d => ({ ...d, [M.listKey]: d[M.listKey].filter(x => x.id !== id) }));
+      if (state.editingId === id) state.editingId = null;
+    }
+
+    function actCsvExport(kind) {
+      const M = ledgerMeta(kind);
+      const list = state.data[M.listKey];
+      const filterKey = kind === 'expense' ? 'filterExpense' : 'filterIncome';
+      const filter = state[filterKey];
+      let filtered = [...list];
+      if (filter !== 'all') {
+        if (state.period === 'month') filtered = filtered.filter(x => monthKey(x.date) === filter);
+        else {
+          const n = Number(filter.replace(/^FY/, ''));
+          filtered = filtered.filter(x => fyFromISO(x.date) === n);
+        }
+      }
+      let headers, rows;
+      if (kind === 'expense') {
+        headers = ['Vendor', 'Category', 'Date', 'Amount', 'GST Inclusive', 'Notes', 'Edited By', 'Edited At'];
+        rows = filtered.map(x => [x.vendor, x.category || '', x.date, parseAmount(x.amount).toFixed(2), x.gstInclusive ? 'yes' : '', x.notes || '', x.editedBy || '', x.editedAt || '']);
+      } else {
+        headers = ['Source', 'Date', 'Amount', 'Notes', 'Edited By', 'Edited At'];
+        rows = filtered.map(x => [x.source, x.date, parseAmount(x.amount).toFixed(2), x.notes || '', x.editedBy || '', x.editedAt || '']);
+      }
+      const suffix = filter === 'all' ? 'all' : filter;
+      download(`ventra-${M.listKey}-${suffix}.csv`, toCSV(rows, headers), 'text/csv');
+    }
+
+    async function actCsvImport(kind, file) {
+      if (!file) return;
+      const text = await file.text();
+      const rows = parseCSV(text);
+      if (rows.length === 0) return;
+      const M = ledgerMeta(kind);
+      const imported = rows.map(r => {
+        const name = r[M.nameField] || r[M.nameLabel.toLowerCase()] || r.charge || r.vendor || r.source || r.name || '';
+        const date = parseFlexDate(r['date charged'] || r.date || '');
+        const amount = parseAmount(r.total || r.amount || r.value || '0');
+        const notes = r.notes || r.note || '';
+        const base = { id: uid(), [M.nameField]: name, date, amount, notes };
+        if (kind === 'expense') {
+          const cat = r.category || '';
+          base.category = EXPENSE_CATEGORIES.includes(cat) ? cat : (cat ? 'Other' : '');
+          base.gstInclusive = /^(yes|true|1|y)$/i.test(r['gst inclusive'] || r.gst || '');
+        }
+        return stamp(base);
+      }).filter(x => x[M.nameField] && x.amount);
+      setData(d => ({ ...d, [M.listKey]: [...d[M.listKey], ...imported] }));
+      alert(`Imported ${imported.length} ${kind} ${imported.length === 1 ? 'entry' : 'entries'}.`);
+    }
+    // ============ Uncollected ============
+    function viewUncollected() {
+      const { uncollected, settings } = state.data;
+      const { currency, partnerA, partnerB } = settings;
+
+      const pending = uncollected.filter(u => !u.collected);
+      const collected = uncollected.filter(u => u.collected);
+      const pendingTotal = pending.reduce((s, u) => s + parseAmount(u.amount), 0);
+      const collectedTotal = collected.reduce((s, u) => s + parseAmount(u.amount), 0);
+
+      const assignOptions = [
+        { value: '', label: '—' },
+        { value: partnerA, label: partnerA },
+        { value: partnerB, label: partnerB },
+        { value: 'Both', label: 'Both' }
+      ];
+
+      const addForm = card(`
+        <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-3">Add item</div>
+        <form data-add-form="uncollected" class="grid grid-cols-1 md:grid-cols-12 gap-3" onsubmit="return false;">
+          <div class="md:col-span-5">
+            ${label('Client')}
+            ${textField({ value: '', field: 'client', placeholder: 'e.g. Warwick management fee' })}
+          </div>
+          <div class="md:col-span-3">
+            ${label('Amount')}
+            ${numberField({ id: 'add-uncollected-amount', field: 'amount' })}
+          </div>
+          <div class="md:col-span-3">
+            ${label('Assigned to')}
+            <select data-field="assignedTo" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
+              ${assignOptions.map(o => `<option value="${attr(o.value)}">${esc(o.label)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="md:col-span-1 flex items-end">
+            ${button({ children: icon('plus', 14), action: 'add-uncollected', className: 'w-full' })}
+          </div>
+          <div class="md:col-span-12">
+            ${label('Notes')}
+            ${textField({ value: '', field: 'notes', placeholder: 'Optional' })}
+          </div>
+        </form>
+      `, 'p-5');
+
+      const summary = `
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Pending</div>
+            <div class="text-2xl font-medium text-stone-900 tabular-nums font-mono">${esc(fmt(pendingTotal, currency))}</div>
+            <div class="text-xs text-stone-500 mt-1">${pending.length} items</div>
+          `, 'p-5')}
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Collected</div>
+            <div class="text-2xl font-medium text-emerald-800 tabular-nums font-mono">${esc(fmt(collectedTotal, currency))}</div>
+            <div class="text-xs text-stone-500 mt-1">${collected.length} items</div>
+          `, 'p-5')}
+        </div>`;
+
+      const rows = [...uncollected]
+        .sort((a,b) => (a.collected - b.collected) || (b.date || '').localeCompare(a.date || ''))
+        .map(u => {
+          const editedStamp = (u.editedBy || u.editedAt)
+            ? `<div class="text-[10px] text-stone-400 mt-0.5">edited${u.editedBy ? ' by ' + esc(u.editedBy) : ''}${u.editedAt ? ' · ' + esc(relTime(u.editedAt)) : ''}</div>`
+            : '';
+          return `<tr class="group hover:bg-stone-50 transition-colors ${u.collected ? 'text-stone-400' : ''}" style="border-bottom: 1px solid #f0ece3;">
+            <td class="px-4 md:px-6 py-4">
+              <button data-action="toggle-collected" data-id="${u.id}"
+                class="w-5 h-5 rounded-md transition-all flex items-center justify-center ${u.collected ? 'text-white' : 'hover:scale-110'}"
+                style="${u.collected ? 'background-color:#7d9d7a;' : 'box-shadow: 0 0 0 1.5px #d6ccbe;'}">
+                ${u.collected ? icon('check', 12) : ''}
+              </button>
+            </td>
+            <td class="px-4 md:px-6 py-4 ${u.collected ? 'line-through' : 'text-stone-900'}">
+              <div>${esc(u.client || '')}</div>
+              ${editedStamp}
+            </td>
+            <td class="px-4 md:px-6 py-4 text-stone-600 text-xs hidden md:table-cell">${esc(u.assignedTo || '—')}</td>
+            <td class="px-4 md:px-6 py-4 text-right tabular-nums font-medium font-mono">${esc(fmt(parseAmount(u.amount), currency))}</td>
+            <td class="px-4 md:px-6 py-4 text-stone-500 text-xs hidden lg:table-cell">${esc(u.notes || '')}</td>
+            <td class="px-4 md:px-6 py-4">
+              <button data-action="delete-uncollected" data-id="${u.id}" class="p-2 rounded-xl text-red-700 hover:bg-red-50 md:opacity-0 md:group-hover:opacity-100 transition-opacity" title="Delete">${icon('trash', 13)}</button>
+            </td>
+          </tr>`;
+        }).join('');
+
+      const table = uncollected.length === 0
+        ? `<div class="p-14 text-center text-stone-500 text-sm">No uncollected items yet.</div>`
+        : `<table class="w-full text-sm">
+            <thead>
+              <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid #f0ece3;">
+                <th class="w-12 text-left px-4 md:px-6 py-4"></th>
+                <th class="text-left font-medium px-4 md:px-6 py-4">Client</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 hidden md:table-cell">Assigned</th>
+                <th class="text-right font-medium px-4 md:px-6 py-4">Amount</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 hidden lg:table-cell">Notes</th>
+                <th class="w-16"></th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+
+      return `
+        <div class="space-y-6">
+          <div>
+            <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">Money owed</div>
+            <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">Uncollected</h1>
+            <p class="text-sm text-stone-500 mt-2">Fees, reimbursements, or splits owed to the business that haven't come in yet.</p>
+          </div>
+          ${summary}
+          ${addForm}
+          ${card(table, 'overflow-hidden')}
+        </div>`;
+    }
+
+    function actAddUncollected() {
+      const form = document.querySelector('[data-add-form="uncollected"]');
+      if (!form) return;
+      const client = (readField(form, 'client') || '').trim();
+      const amount = parseAmount(readField(form, 'amount'));
+      if (!client || !amount) return;
+      const entry = stamp({
+        id: uid(),
+        client,
+        date: todayISO(),
+        amount,
+        collected: false,
+        assignedTo: readField(form, 'assignedTo') || '',
+        notes: readField(form, 'notes') || ''
+      });
+      setData(d => ({ ...d, uncollected: [...d.uncollected, entry] }));
+    }
+
+    function actToggleCollected(id) {
+      setData(d => ({
+        ...d,
+        uncollected: d.uncollected.map(u => u.id === id ? stamp({ ...u, collected: !u.collected }) : u)
+      }));
+    }
+
+    function actDeleteUncollected(id) {
+      if (!confirm('Delete this item?')) return;
+      setData(d => ({ ...d, uncollected: d.uncollected.filter(u => u.id !== id) }));
+    }
+
+    // ============ Loans ============
+    function viewLoans() {
+      const { loans, settings } = state.data;
+      const { currency } = settings;
+      const total = loans.reduce((s, l) => s + parseAmount(l.amount) * (l.direction === 'in' ? -1 : 1), 0);
+
+      const directionOptions = [
+        { value: 'out', label: 'Loaned to business' },
+        { value: 'in',  label: 'Paid back' }
+      ];
+
+      const net = card(`
+        <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Net position</div>
+        <div class="text-3xl font-medium tabular-nums font-mono ${total >= 0 ? 'text-stone-900' : 'text-emerald-800'}">
+          ${total >= 0 ? '' : '-'}${esc(fmt(Math.abs(total), currency))}
+        </div>
+        <div class="text-xs text-stone-500 mt-1">${total >= 0 ? 'Owed back to lender' : 'Business has been paid back'}</div>
+      `, 'p-5');
+
+      const addForm = card(`
+        <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-3">Add loan entry</div>
+        <form data-add-form="loan" class="grid grid-cols-1 md:grid-cols-12 gap-3" onsubmit="return false;">
+          <div class="md:col-span-4">
+            ${label('Counterparty')}
+            ${textField({ value: '', field: 'counterparty', placeholder: 'e.g. Dan — personal loan' })}
+          </div>
+          <div class="md:col-span-2">
+            ${label('Date')}
+            ${textField({ type: 'date', value: todayISO(), field: 'date' })}
+          </div>
+          <div class="md:col-span-3">
+            ${label('Amount')}
+            ${numberField({ id: 'add-loan-amount', field: 'amount' })}
+          </div>
+          <div class="md:col-span-2">
+            ${label('Direction')}
+            <select data-field="direction" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
+              ${directionOptions.map(o => `<option value="${attr(o.value)}">${esc(o.label)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="md:col-span-1 flex items-end">
+            ${button({ children: icon('plus', 14), action: 'add-loan', className: 'w-full' })}
+          </div>
+          <div class="md:col-span-12">
+            ${label('Notes')}
+            ${textField({ value: '', field: 'notes', placeholder: 'Optional' })}
+          </div>
+        </form>
+      `, 'p-5');
+
+      const rows = [...loans].sort((a,b) => (b.date || '').localeCompare(a.date || '')).map(l => {
+        const editedStamp = (l.editedBy || l.editedAt)
+          ? `<div class="text-[10px] text-stone-400 mt-0.5">edited${l.editedBy ? ' by ' + esc(l.editedBy) : ''}${l.editedAt ? ' · ' + esc(relTime(l.editedAt)) : ''}</div>`
+          : '';
+        return `<tr class="group hover:bg-stone-50 transition-colors" style="border-bottom: 1px solid #f0ece3;">
+          <td class="px-4 md:px-6 py-4 text-stone-900">
+            <div>${esc(l.counterparty || '')}</div>
+            ${editedStamp}
+          </td>
+          <td class="px-4 md:px-6 py-4 text-stone-600 tabular-nums text-xs font-mono hidden md:table-cell">${esc(fmtDate(l.date))}</td>
+          <td class="px-4 md:px-6 py-4 text-xs">
+            <span class="inline-block px-3 py-1 rounded-full text-[11px]" style="${l.direction === 'out' ? 'background-color:#f5efe6; color:#6b5d4f;' : 'background-color:#edf3ec; color:#5a7d57;'}">
+              ${l.direction === 'out' ? 'Loaned' : 'Paid back'}
+            </span>
+          </td>
+          <td class="px-4 md:px-6 py-4 text-right tabular-nums font-medium font-mono">${esc(fmt(parseAmount(l.amount), currency))}</td>
+          <td class="px-4 md:px-6 py-4 text-stone-500 text-xs hidden lg:table-cell">${esc(l.notes || '')}</td>
+          <td class="px-4 md:px-6 py-4">
+            <button data-action="delete-loan" data-id="${l.id}" class="p-2 rounded-xl text-red-700 hover:bg-red-50 md:opacity-0 md:group-hover:opacity-100 transition-opacity" title="Delete">${icon('trash', 13)}</button>
+          </td>
+        </tr>`;
+      }).join('');
+
+      const table = loans.length === 0
+        ? `<div class="p-14 text-center text-stone-500 text-sm">No loan entries yet.</div>`
+        : `<table class="w-full text-sm">
+            <thead>
+              <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid #f0ece3;">
+                <th class="text-left font-medium px-4 md:px-6 py-4">Counterparty</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 hidden md:table-cell">Date</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4">Direction</th>
+                <th class="text-right font-medium px-4 md:px-6 py-4">Amount</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 hidden lg:table-cell">Notes</th>
+                <th class="w-16"></th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+
+      return `
+        <div class="space-y-6">
+          <div>
+            <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">Loans tracker</div>
+            <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">Personal loans</h1>
+            <p class="text-sm text-stone-500 mt-2">Money lent to the business or drawn from it, tracked separately from regular expenses.</p>
+          </div>
+          ${net}
+          ${addForm}
+          ${card(table, 'overflow-hidden')}
+        </div>`;
+    }
+
+    function actAddLoan() {
+      const form = document.querySelector('[data-add-form="loan"]');
+      if (!form) return;
+      const counterparty = (readField(form, 'counterparty') || '').trim();
+      const amount = parseAmount(readField(form, 'amount'));
+      if (!counterparty || !amount) return;
+      const entry = stamp({
+        id: uid(),
+        counterparty, amount,
+        date: readField(form, 'date') || todayISO(),
+        notes: readField(form, 'notes') || '',
+        direction: readField(form, 'direction') || 'out'
+      });
+      setData(d => ({ ...d, loans: [...d.loans, entry] }));
+    }
+
+    function actDeleteLoan(id) {
+      if (!confirm('Delete this loan entry?')) return;
+      setData(d => ({ ...d, loans: d.loans.filter(l => l.id !== id) }));
+    }
+    // ============ Tax (EOFY summary) ============
+    function viewTax() {
+      const { expenses, income, settings } = state.data;
+      const { currency, partnerA, partnerB, splitA, splitB, gstEnabled, gstRate } = settings;
+
+      // FY selection: Tax tab always uses the FY picker.
+      // If user arrived from month mode, default to the FY that contains state.currentMonth.
+      const fyForMonth = (() => {
+        const [y, m] = (state.currentMonth || '').split('-').map(Number);
+        return m >= 7 ? y + 1 : y;
+      })();
+      const targetFY = state.period === 'fy' ? state.currentFY : fyForMonth;
+
+      const fyIncome = income.filter(i => isoInFY(i.date, targetFY));
+      const fyExpenses = expenses.filter(e => isoInFY(e.date, targetFY));
+
+      const totalIncome = fyIncome.reduce((s, i) => s + parseAmount(i.amount), 0);
+      const totalExpenses = fyExpenses.reduce((s, e) => s + parseAmount(e.amount), 0);
+      const net = totalIncome - totalExpenses;
+      const shareA = net * (splitA / 100);
+      const shareB = net * (splitB / 100);
+
+      // Group expenses by category
+      const byCat = new Map();
+      for (const e of fyExpenses) {
+        const c = e.category || 'Uncategorised';
+        const prev = byCat.get(c) || { total: 0, count: 0 };
+        byCat.set(c, { total: prev.total + parseAmount(e.amount), count: prev.count + 1 });
+      }
+      const catRows = [...byCat.entries()]
+        .sort((a, b) => b[1].total - a[1].total)
+        .map(([cat, v]) => ({ cat, total: v.total, count: v.count, pct: totalExpenses > 0 ? (v.total / totalExpenses) * 100 : 0 }));
+
+      // GST total — sum GST component of expenses marked gstInclusive (rate% of amount / (100+rate))
+      let gstTotal = 0;
+      if (gstEnabled) {
+        for (const e of fyExpenses) {
+          if (e.gstInclusive) {
+            const amt = parseAmount(e.amount);
+            gstTotal += amt * (gstRate / (100 + gstRate));
+          }
+        }
+      }
+
+      const summary = `
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Income</div>
+            <div class="text-[28px] font-medium text-stone-900 tabular-nums font-mono">${esc(fmt(totalIncome, currency))}</div>
+            <div class="text-xs text-stone-500 mt-1">${fyIncome.length} entries</div>
+          `, 'p-5')}
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Expenses</div>
+            <div class="text-[28px] font-medium text-stone-900 tabular-nums font-mono">${esc(fmt(totalExpenses, currency))}</div>
+            <div class="text-xs text-stone-500 mt-1">${fyExpenses.length} charges</div>
+          `, 'p-5')}
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-400 mb-2">Net profit</div>
+            <div class="text-[28px] font-medium tabular-nums font-mono ${net >= 0 ? 'text-stone-50' : 'text-red-300'}">${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), currency))}</div>
+            <div class="text-xs text-stone-400 mt-1">Before tax</div>
+          `, 'p-5', 'background: linear-gradient(135deg, #2d2924 0%, #1f1c18 100%);')}
+        </div>`;
+
+      const partnerSplit = card(`
+        <div class="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Partner split</div>
+            <h2 class="font-serif text-xl font-light text-stone-900">End of year distribution</h2>
+          </div>
+          <div class="text-xs text-stone-500 text-right"><div>${splitA}% / ${splitB}%</div></div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          ${[{ name: partnerA, share: shareA, pct: splitA }, { name: partnerB, share: shareB, pct: splitB }].map(p => `
+            <div class="rounded-2xl p-4" style="background-color:#f5efe6;">
+              <div class="text-sm font-medium text-stone-900">${esc(p.name)}</div>
+              <div class="text-[11px] text-stone-500 mb-2">${p.pct}% share</div>
+              <div class="text-xl font-medium tabular-nums font-mono ${p.share >= 0 ? 'text-stone-900' : 'text-red-700'}">
+                ${p.share >= 0 ? '' : '-'}${esc(fmt(Math.abs(p.share), currency))}
+              </div>
+            </div>`).join('')}
+        </div>
+      `, 'p-5');
+
+      const gstCard = gstEnabled ? card(`
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">GST paid (component of incl. expenses)</div>
+            <div class="text-xs text-stone-500">Rate: ${gstRate}%</div>
+          </div>
+          <div class="text-2xl font-medium tabular-nums font-mono text-stone-900">${esc(fmt(gstTotal, currency))}</div>
+        </div>
+      `, 'p-5') : '';
+
+      const catTable = catRows.length === 0
+        ? `<div class="p-10 text-center text-stone-500 text-sm">No expenses in FY${targetFY}.</div>`
+        : `<table class="w-full text-sm">
+            <thead>
+              <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid #f0ece3;">
+                <th class="text-left font-medium px-4 md:px-6 py-4">Category</th>
+                <th class="text-right font-medium px-4 md:px-6 py-4 hidden md:table-cell">Count</th>
+                <th class="text-right font-medium px-4 md:px-6 py-4">Total</th>
+                <th class="text-right font-medium px-4 md:px-6 py-4 hidden md:table-cell">Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${catRows.map(r => `
+                <tr style="border-bottom: 1px solid #f0ece3;">
+                  <td class="px-4 md:px-6 py-3 text-stone-900">${esc(r.cat)}</td>
+                  <td class="px-4 md:px-6 py-3 text-right text-stone-600 tabular-nums hidden md:table-cell">${r.count}</td>
+                  <td class="px-4 md:px-6 py-3 text-right tabular-nums font-medium font-mono">${esc(fmt(r.total, currency))}</td>
+                  <td class="px-4 md:px-6 py-3 text-right text-stone-500 text-xs hidden md:table-cell">${r.pct.toFixed(1)}%</td>
+                </tr>`).join('')}
+              <tr style="background-color:#f5efe6;">
+                <td class="px-4 md:px-6 py-3 text-stone-900 font-medium">Total</td>
+                <td class="px-4 md:px-6 py-3 text-right text-stone-600 tabular-nums hidden md:table-cell">${fyExpenses.length}</td>
+                <td class="px-4 md:px-6 py-3 text-right tabular-nums font-medium font-mono">${esc(fmt(totalExpenses, currency))}</td>
+                <td class="px-4 md:px-6 py-3 hidden md:table-cell"></td>
+              </tr>
+            </tbody>
+          </table>`;
+
+      return `
+        <div class="space-y-6 print-page">
+          <div class="flex items-end justify-between flex-wrap gap-4">
+            <div>
+              <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">End of financial year</div>
+              <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">Tax — FY${targetFY}</h1>
+              <p class="text-sm text-stone-500 mt-2">${esc(partnerA)} &amp; ${esc(partnerB)} · Jul ${targetFY-1} – Jun ${targetFY}${gstEnabled ? ` · GST registered (${gstRate}%)` : ''}</p>
+            </div>
+            <div class="flex gap-2 no-print">
+              ${button({ children: `${icon('download', 14)} Export CSV`, variant: 'secondary', size: 'sm', action: 'tax-csv-export' })}
+              ${button({ children: `${icon('printer', 14)} Print / PDF`, variant: 'secondary', size: 'sm', action: 'tax-print' })}
+            </div>
+          </div>
+          ${summary}
+          <div class="grid grid-cols-1 ${gstEnabled ? 'md:grid-cols-2' : ''} gap-4">
+            ${partnerSplit}
+            ${gstCard}
+          </div>
+          ${card(`
+            <div class="p-5 pb-0">
+              <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Expenses by category</div>
+              <h2 class="font-serif text-xl font-light text-stone-900">For your accountant</h2>
+            </div>
+            <div class="overflow-x-auto">${catTable}</div>
+          `)}
+        </div>`;
+    }
+
+    function actTaxCsvExport() {
+      const { expenses, income, settings } = state.data;
+      const fy = state.period === 'fy' ? state.currentFY : (() => {
+        const [y, m] = (state.currentMonth || '').split('-').map(Number);
+        return m >= 7 ? y + 1 : y;
+      })();
+      const rows = [];
+      rows.push(['Type', 'Date', 'Name', 'Category', 'Amount', 'GST Inclusive', 'Notes']);
+      for (const e of expenses.filter(x => isoInFY(x.date, fy))) {
+        rows.push(['Expense', e.date, e.vendor || '', e.category || '', parseAmount(e.amount).toFixed(2), e.gstInclusive ? 'yes' : '', e.notes || '']);
+      }
+      for (const i of income.filter(x => isoInFY(x.date, fy))) {
+        rows.push(['Income', i.date, i.source || '', '', parseAmount(i.amount).toFixed(2), '', i.notes || '']);
+      }
+      const csv = rows.map(r => r.map(v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v)).join(',')).join('\n');
+      download(`ventra-ledger-FY${fy}.csv`, csv, 'text/csv');
+    }
+
+    function actTaxPrint() {
+      window.print();
+    }
+    // ============ Settings ============
+    function viewSettings() {
+      const { settings } = state.data;
+      const splitAVal = Number(settings.splitA) || 0;
+      const splitBVal = 100 - splitAVal;
+
+      const partnersCard = card(`
+        <h2 class="text-sm font-medium text-stone-900 mb-4">Partners</h2>
+        <form data-settings-form class="grid grid-cols-2 gap-4" onsubmit="return false;">
+          <div>
+            ${label('Partner A name')}
+            ${textField({ value: settings.partnerA, field: 'partnerA' })}
+          </div>
+          <div>
+            ${label('Partner B name')}
+            ${textField({ value: settings.partnerB, field: 'partnerB' })}
+          </div>
+          <div>
+            ${label(`${settings.partnerA}'s share (%)`)}
+            ${numberField({ id: 'settings-splitA', value: String(splitAVal), field: 'splitA', prefix: '', step: 5 })}
+          </div>
+          <div>
+            ${label(`${settings.partnerB}'s share (%)`)}
+            <div class="px-4 py-2.5 text-sm rounded-2xl text-stone-500 tabular-nums font-mono" style="background-color:#f5efe6;">${splitBVal}%</div>
+          </div>
+          <div class="col-span-2">
+            ${label('Currency')}
+            <select data-field="currency" class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 focus:outline-none" style="${shadowField}">
+              ${CURRENCY_OPTIONS.map(o => `<option value="${attr(o.value)}"${settings.currency === o.value ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
+            </select>
+          </div>
+        </form>
+        <div class="mt-5 flex justify-end">
+          ${button({ children: 'Save settings', variant: 'accent', action: 'save-settings' })}
+        </div>
+      `, 'p-6');
+
+      const gstCard = card(`
+        <h2 class="text-sm font-medium text-stone-900 mb-1">GST</h2>
+        <p class="text-sm text-stone-500 mb-4">Only turn this on if the business is registered for GST. When off, GST columns and totals are hidden everywhere.</p>
+        <form data-gst-form class="grid grid-cols-1 md:grid-cols-2 gap-4" onsubmit="return false;">
+          <div>
+            <label class="flex items-center gap-3 px-4 py-2.5 text-sm bg-white rounded-2xl cursor-pointer" style="${shadowField}">
+              <input type="checkbox" data-field="gstEnabled" class="accent-stone-900" ${settings.gstEnabled ? 'checked' : ''} />
+              <span class="text-stone-900">GST registered</span>
+            </label>
+          </div>
+          <div>
+            ${label('Rate (%)')}
+            ${numberField({ id: 'settings-gst-rate', value: String(settings.gstRate || 10), field: 'gstRate', prefix: '', step: 1 })}
+          </div>
+        </form>
+        <div class="mt-4 flex justify-end">
+          ${button({ children: 'Save GST settings', variant: 'accent', action: 'save-gst' })}
+        </div>
+      `, 'p-6');
+
+      const userCard = card(`
+        <h2 class="text-sm font-medium text-stone-900 mb-1">Your name on this device</h2>
+        <p class="text-sm text-stone-500 mb-4">
+          Stamps entries you add or edit with your name so your partner can see who did what.
+          Stored on this device only — <strong>not synced</strong>. Each person should set their own name on their own device.
+        </p>
+        <form data-user-form class="grid grid-cols-1 md:grid-cols-3 gap-3" onsubmit="return false;">
+          <div class="md:col-span-2">
+            ${textField({ value: state.userName, field: 'userName', placeholder: 'e.g. Dan' })}
+          </div>
+          <div class="flex items-stretch">
+            ${button({ children: 'Save', variant: 'accent', action: 'save-username', className: 'w-full' })}
+          </div>
+        </form>
+        ${state.userName ? `<div class="text-xs text-stone-500 mt-3">Currently signed in as <strong class="text-stone-800">${esc(state.userName)}</strong>.</div>` : ''}
+      `, 'p-6');
+
+      const dataRecoveryCard = card(`
+        <h2 class="text-sm font-medium text-stone-900 mb-1">Data recovery</h2>
+        <p class="text-sm text-stone-500 mb-4">
+          Export the raw ledger JSON directly from this device's storage. This works even if cloud
+          sync is broken or mis-configured — it reads straight from <code class="px-1 py-0.5 rounded" style="background-color:#f0ece3;">localStorage</code>.
+          Keep a copy at tax time.
+        </p>
+        <div class="flex flex-wrap gap-2">
+          ${button({ children: `${icon('download', 14)} Export JSON (escape hatch)`, variant: 'secondary', action: 'export-json-raw' })}
+          <input type="file" accept=".json" class="hidden" data-json-input />
+          ${button({ children: `${icon('upload', 14)} Import JSON`, variant: 'secondary', action: 'import-json' })}
+        </div>
+      `, 'p-6');
+
+      const dangerCard = card(`
+        <h2 class="text-sm font-medium text-red-900 mb-1">Danger zone</h2>
+        <p class="text-sm text-stone-500 mb-4">Wipe all ledger data on this device. Export a backup first if you might need it.</p>
+        ${button({ children: `${icon('trash', 14)} Reset all data`, variant: 'danger', action: 'reset-all' })}
+      `, 'p-6');
+
+      return `
+        <div class="space-y-6 max-w-3xl">
+          <div>
+            <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">Configuration</div>
+            <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">Settings</h1>
+          </div>
+          ${partnersCard}
+          ${gstCard}
+          ${userCard}
+          ${dataRecoveryCard}
+          ${dangerCard}
+        </div>`;
+    }
+
+    // Read direct from localStorage regardless of current in-memory state —
+    // escape hatch if sync got confused or the page is misbehaving.
+    function actExportJsonRaw() {
+      try {
+        flushSave(); // write any pending debounced save first
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : state.data;
+        const payload = JSON.stringify(parsed, null, 2);
+        download(`ventra-ledger-${todayISO()}.json`, payload, 'application/json');
+      } catch (err) {
+        // Last-resort fallback — dump in-memory state
+        alert('Could not read localStorage; dumping in-memory ledger instead.');
+        download(`ventra-ledger-${todayISO()}.json`, JSON.stringify(state.data, null, 2), 'application/json');
+      }
+    }
+
+    async function actImportJson(file) {
+      if (!file) return;
+      try {
+        const parsed = JSON.parse(await file.text());
+        if (!parsed || typeof parsed !== 'object') throw new Error('Invalid');
+        const merge = confirm('Click OK to MERGE with existing data.\nClick Cancel to REPLACE all current data.');
+        if (merge) {
+          setData(d => migrate({
+            expenses: [...d.expenses, ...(parsed.expenses || [])],
+            income: [...d.income, ...(parsed.income || [])],
+            uncollected: [...d.uncollected, ...(parsed.uncollected || [])],
+            loans: [...d.loans, ...(parsed.loans || [])],
+            settings: d.settings
+          }));
+          alert('Imported and merged.');
+        } else {
+          setData(() => migrate(parsed));
+          alert('Imported and replaced.');
+        }
+      } catch (err) {
+        alert('Could not read that file.');
+      }
+    }
+
+    function actSaveSettings() {
+      const form = document.querySelector('[data-settings-form]');
+      if (!form) return;
+      const partnerA = (readField(form, 'partnerA') || '').trim() || 'Partner A';
+      const partnerB = (readField(form, 'partnerB') || '').trim() || 'Partner B';
+      let splitA = Math.max(0, Math.min(100, Number(readField(form, 'splitA')) || 0));
+      const currency = readField(form, 'currency') || 'AUD';
+      setData(d => ({ ...d, settings: { ...d.settings, partnerA, partnerB, splitA, splitB: 100 - splitA, currency } }));
+    }
+
+    function actSaveGst() {
+      const form = document.querySelector('[data-gst-form]');
+      if (!form) return;
+      const enabled = !!form.querySelector('[data-field="gstEnabled"]').checked;
+      const rate = Math.max(0, Math.min(100, Number(readField(form, 'gstRate')) || 10));
+      setData(d => ({ ...d, settings: { ...d.settings, gstEnabled: enabled, gstRate: rate } }));
+    }
+
+    function actSaveUsername() {
+      const form = document.querySelector('[data-user-form]');
+      if (!form) return;
+      const name = (readField(form, 'userName') || '').trim();
+      state.userName = name;
+      saveUser(name);
+      render();
+    }
+
+    function actResetAll() {
+      if (!confirm('Delete ALL ledger data on this device? This can not be undone.')) return;
+      if (!confirm('Really delete? Your partner\'s copy (if synced) is not affected.')) return;
+      setData(d => migrate({ ...defaultData, settings: d.settings }));
+    }
+
+    const VIEW_RENDERERS = {
+      overview: viewOverview,
+      expenses: viewExpenses,
+      income: viewIncome,
+      uncollected: viewUncollected,
+      loans: viewLoans,
+      tax: viewTax,
+      settings: viewSettings
+    };
+
+    // ============ Render ============
+    const root = document.getElementById('root');
+
+    function render() {
+      const renderer = VIEW_RENDERERS[state.tab] || viewOverview;
+      root.innerHTML = layout(renderer());
+    }
+
+    // ============ Event delegation ============
+    // Single click handler dispatches on [data-action].
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-action]');
+      if (!el) return;
+      const action = el.dataset.action;
+
+      // Tab navigation
+      if (action === 'tab') {
+        state.tab = el.dataset.tab;
+        state.openDropdown = null;
+        state.editingId = null;
+        window.scrollTo(0, 0);
+        return render();
+      }
+
+      // Period mode toggle
+      if (action === 'set-period-mode') {
+        state.period = el.dataset.mode;
+        state.openDropdown = null;
+        return render();
+      }
+
+      // Dropdown toggle
+      if (action === 'toggle-dropdown') {
+        const id = el.dataset.dropdownId;
+        state.openDropdown = (state.openDropdown === id) ? null : id;
+        return render();
+      }
+
+      // Period picker selections
+      if (action === 'pick-month') {
+        state.currentMonth = el.dataset.value;
+        state.openDropdown = null;
+        return render();
+      }
+      if (action === 'pick-fy') {
+        state.currentFY = Number(el.dataset.value);
+        state.openDropdown = null;
+        return render();
+      }
+
+      // Number field +/– step
+      if (action === 'num-step') {
+        const target = document.getElementById(el.dataset.target);
+        if (!target) return;
+        const delta = Number(el.dataset.delta) || 0;
+        const cur = parseAmount(target.value);
+        const next = Math.max(0, cur + delta);
+        target.value = next.toFixed(2);
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+        return;
+      }
+
+      // Ledger: add / edit / delete / filter / sort / csv
+      if (action === 'add-entry') return actAddEntry(el.dataset.kind);
+      if (action === 'start-edit') { state.editingId = el.dataset.id; return render(); }
+      if (action === 'cancel-edit') { state.editingId = null; return render(); }
+      if (action === 'save-edit') return actSaveEdit(el.dataset.kind, el.dataset.id);
+      if (action === 'delete-entry') return actDeleteEntry(el.dataset.kind, el.dataset.id);
+
+      if (action === 'set-filter') {
+        const ddid = el.dataset.dropdownId || '';
+        const kind = ddid.replace(/^filter-/, '');
+        const key = kind === 'expense' ? 'filterExpense' : 'filterIncome';
+        state[key] = el.dataset.value;
+        state.openDropdown = null;
+        return render();
+      }
+
+      if (action === 'sort') {
+        const kind = el.dataset.kind;
+        const field = el.dataset.field;
+        const key = kind === 'expense' ? 'sortExpense' : 'sortIncome';
+        const cur = state[key];
+        state[key] = cur.field === field
+          ? { field, dir: cur.dir === 'asc' ? 'desc' : 'asc' }
+          : { field, dir: 'asc' };
+        return render();
+      }
+
+      if (action === 'csv-export') return actCsvExport(el.dataset.kind);
+      if (action === 'csv-import') {
+        const fi = document.querySelector(`[data-csv-input="${el.dataset.kind}"]`);
+        if (fi) fi.click();
+        return;
+      }
+
+      // Uncollected
+      if (action === 'add-uncollected') return actAddUncollected();
+      if (action === 'toggle-collected') return actToggleCollected(el.dataset.id);
+      if (action === 'delete-uncollected') return actDeleteUncollected(el.dataset.id);
+
+      // Loans
+      if (action === 'add-loan') return actAddLoan();
+      if (action === 'delete-loan') return actDeleteLoan(el.dataset.id);
+
+      // Tax
+      if (action === 'tax-csv-export') return actTaxCsvExport();
+      if (action === 'tax-print') return actTaxPrint();
+
+      // Settings
+      if (action === 'save-settings') return actSaveSettings();
+      if (action === 'save-gst') return actSaveGst();
+      if (action === 'save-username') return actSaveUsername();
+      if (action === 'reset-all') return actResetAll();
+      if (action === 'export-json-raw') return actExportJsonRaw();
+      if (action === 'import-json') {
+        const fi = document.querySelector('[data-json-input]');
+        if (fi) fi.click();
+        return;
+      }
+    });
+
+    // File input change handler (CSV + JSON imports)
+    document.addEventListener('change', (e) => {
+      const csvInput = e.target.closest('[data-csv-input]');
+      if (csvInput) {
+        const kind = csvInput.dataset.csvInput;
+        const file = csvInput.files && csvInput.files[0];
+        if (file) actCsvImport(kind, file);
+        csvInput.value = '';
+        return;
+      }
+      const jsonInput = e.target.closest('[data-json-input]');
+      if (jsonInput) {
+        const file = jsonInput.files && jsonInput.files[0];
+        if (file) actImportJson(file);
+        jsonInput.value = '';
+      }
+    });
+
+    // Enter-to-submit in add forms (feels more like the React original)
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const form = e.target.closest && e.target.closest('[data-add-form]');
+      if (!form) return;
+      // Don't submit on Enter inside a <select> or textarea
+      if (e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+      e.preventDefault();
+      const kind = form.dataset.addForm;
+      actAddEntry(kind);
+    });
+
+    // Outside-click closes any open custom dropdown
+    document.addEventListener('mousedown', (e) => {
+      if (state.openDropdown && !e.target.closest('[data-dropdown]')) {
+        state.openDropdown = null;
+        render();
+      }
+    });
+
+    // Initial render
+    render();
+  </script>
+</body>
+</html>
