@@ -6,6 +6,12 @@
   <meta name="theme-color" content="#16181a" />
   <meta name="color-scheme" content="dark" />
   <title>Ventra Ledger</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="apple-touch-icon" href="./icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Ledger" />
 
   <!-- Tailwind Play CDN (JIT, supports arbitrary values) -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -1156,7 +1162,7 @@
         </button>`;
       }).join('');
       return `<aside class="hidden md:flex fixed top-0 left-0 h-screen w-[220px] flex-col p-4 z-20 no-print" style="background-color:var(--sidebar);">
-        <div class="flex items-center gap-2.5 px-2 pt-2 pb-6">
+        <div class="flex items-center gap-2.5 px-2 pt-2 pb-4">
           <div class="w-9 h-9 rounded-xl flex items-center justify-center" style="background-color: var(--surface-raised); box-shadow: inset 0 0 0 1px rgba(200,184,239,0.25);">
             <span class="font-serif text-lg italic leading-none" style="color: var(--accent);">V</span>
           </div>
@@ -1165,6 +1171,12 @@
             <div class="text-[10px] tracking-[0.1em] text-stone-500 uppercase">Ledger</div>
           </div>
         </div>
+        <button data-action="install-pwa" data-install-btn
+          class="w-full flex items-center justify-center gap-2 px-3 py-2 mb-4 rounded-2xl text-xs font-medium transition-colors"
+          style="display:none; background: var(--accent-glow); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(200,184,239,0.35);"
+          title="Install Ventra Ledger">
+          ${icon('download', 13)}<span>Install app</span>
+        </button>
         <nav class="flex-1 space-y-1">${nav}</nav>
         <div class="pt-4 border-t" style="border-color:var(--border-strong);">
           <div class="flex items-center gap-2 px-3 py-2 text-xs text-stone-500">
@@ -2872,6 +2884,46 @@
         </div>
       `, 'p-6');
 
+      // ----- Install card (PWA) -----
+      const installCard = (() => {
+        const standalone = pwa.isStandalone;
+        const installable = !!pwa.deferredPrompt && !standalone;
+        const isIOS = pwa.isIOS && !standalone;
+        if (standalone) {
+          return card(`
+            <div class="flex items-center gap-3">
+              <div class="w-9 h-9 rounded-xl flex items-center justify-center" style="background: var(--accent-glow); color: var(--accent);">${icon('check', 18)}</div>
+              <div>
+                <div class="text-sm font-medium text-stone-900">Installed</div>
+                <div class="text-xs text-stone-500">Running as a standalone app on this device.</div>
+              </div>
+            </div>
+          `, 'p-5');
+        }
+        if (installable) {
+          return card(`
+            <div class="flex items-start justify-between gap-4 flex-wrap">
+              <div>
+                <h2 class="text-sm font-medium text-stone-900 mb-1">Install Ventra Ledger</h2>
+                <p class="text-xs text-stone-500">Adds an icon to your dock / home screen and opens in its own window. Works offline.</p>
+              </div>
+              ${button({ children: `${icon('download', 14)} Install`, variant: 'accent', action: 'install-pwa' })}
+            </div>
+          `, 'p-5');
+        }
+        if (isIOS) {
+          return card(`
+            <h2 class="text-sm font-medium text-stone-900 mb-1">Install on iOS</h2>
+            <p class="text-xs text-stone-500 leading-relaxed">
+              Tap the <strong class="text-stone-800">Share</strong> button in Safari, then choose
+              <strong class="text-stone-800">Add to Home Screen</strong>. The app will open in its own
+              window with offline support.
+            </p>
+          `, 'p-5');
+        }
+        return '';
+      })();
+
       // Sync status visuals for the Settings card
       const syncStatusLabel = ({
         idle: sync.lastSyncedAt ? `Synced · ${relTime(sync.lastSyncedAt)}` : 'Synced',
@@ -2982,6 +3034,7 @@
             <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">Configuration</div>
             <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">Settings</h1>
           </div>
+          ${installCard || ''}
           ${partnersCard}
           ${syncCard}
           ${gstCard}
@@ -3380,6 +3433,18 @@
         return;
       }
 
+      // PWA
+      if (action === 'install-pwa') {
+        if (!pwa.deferredPrompt) return;
+        pwa.deferredPrompt.prompt();
+        pwa.deferredPrompt.userChoice.finally(() => {
+          pwa.deferredPrompt = null;
+          paintInstallButton();
+          render();
+        });
+        return;
+      }
+
       // Sync
       if (action === 'sync-save-and-push') return actSyncSaveAndPush();
       if (action === 'sync-test')          return actSyncTest();
@@ -3506,6 +3571,49 @@
     if (typeof syncOnLoad === 'function') {
       // micro-delay so the first paint lands before any sync UI updates
       setTimeout(() => syncOnLoad().catch(err => console.warn('syncOnLoad failed:', err)), 0);
+    }
+
+    // ============ PWA: Service Worker + install prompt ============
+    // Skip on file:// (SW requires http or https). Default scope is derived
+    // from sw.js URL → /ledger/ when hosted at https://x.github.io/ledger/.
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .catch(err => console.warn('[ledger] SW registration failed:', err));
+      });
+    }
+
+    // Capture beforeinstallprompt for the in-app install button.
+    const pwa = { deferredPrompt: null, isStandalone: false, isIOS: false };
+    pwa.isStandalone =
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+      window.navigator.standalone === true;
+    pwa.isIOS = /iPad|iPhone|iPod/.test(window.navigator.userAgent) && !window.MSStream;
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      pwa.deferredPrompt = e;
+      paintInstallButton();
+    });
+    window.addEventListener('appinstalled', () => {
+      pwa.deferredPrompt = null;
+      pwa.isStandalone = true;
+      paintInstallButton();
+      showToast('Installed. Open from your home screen / dock.', 'success');
+    });
+
+    function paintInstallButton() {
+      document.querySelectorAll('[data-install-btn]').forEach(el => {
+        el.style.display = pwa.deferredPrompt && !pwa.isStandalone ? '' : 'none';
+      });
+    }
+
+    // One-time iOS hint toast: only when NOT installed and on iOS.
+    if (pwa.isIOS && !pwa.isStandalone && !sessionStorage.getItem('ventra-ios-hint-shown')) {
+      setTimeout(() => {
+        showToast('Tip: tap Share → Add to Home Screen to install Ventra Ledger.', 'info');
+        sessionStorage.setItem('ventra-ios-hint-shown', '1');
+      }, 1200);
     }
   </script>
 
