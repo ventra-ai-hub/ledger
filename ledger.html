@@ -299,6 +299,121 @@
       return iso >= r.start && iso <= r.end;
     };
 
+    // Quarters use AU financial-year quarters:
+    //   Q1: Jul–Sep  Q2: Oct–Dec  Q3: Jan–Mar  Q4: Apr–Jun
+    // Numbered by the FY they belong to (the FY containing 1 Jul start).
+    // Key format: 'FY{year}-Q{n}' — 'FY2026-Q1' = Jul–Sep 2025.
+    function quarterFromISO(iso) {
+      if (!iso) return null;
+      const [y, m] = iso.split('-').map(Number);
+      let fy, q;
+      if (m >= 7 && m <= 9)        { fy = y + 1; q = 1; }
+      else if (m >= 10 && m <= 12) { fy = y + 1; q = 2; }
+      else if (m >= 1 && m <= 3)   { fy = y;     q = 3; }
+      else                         { fy = y;     q = 4; }
+      return { fy, q, key: `FY${fy}-Q${q}` };
+    }
+    const quarterKey = (iso) => { const x = quarterFromISO(iso); return x ? x.key : ''; };
+    const currentQuarter = () => quarterFromISO(todayISO());
+
+    function quarterRange({ fy, q }) {
+      const map = {
+        1: [`${fy-1}-07-01`, `${fy-1}-09-30`],
+        2: [`${fy-1}-10-01`, `${fy-1}-12-31`],
+        3: [`${fy}-01-01`,   `${fy}-03-31`],
+        4: [`${fy}-04-01`,   `${fy}-06-30`],
+      };
+      const [start, end] = map[q];
+      return { start, end };
+    }
+    function isoInQuarter(iso, qObj) {
+      if (!iso || !qObj) return false;
+      const r = quarterRange(qObj);
+      return iso >= r.start && iso <= r.end;
+    }
+    function previousQuarter({ fy, q }) {
+      if (q === 1) return { fy: fy - 1, q: 4 };
+      return { fy, q: q - 1 };
+    }
+    function quarterShort({ fy, q }) {
+      const labels = { 1: 'Jul–Sep', 2: 'Oct–Dec', 3: 'Jan–Mar', 4: 'Apr–Jun' };
+      const yearShown = q < 3 ? fy - 1 : fy;
+      return `${labels[q]} ${yearShown}`;
+    }
+    function quarterDisplay({ fy, q }) {
+      return `Q${q} FY${fy} · ${quarterShort({ fy, q })}`;
+    }
+    function quarterFromKey(key) {
+      const m = (key || '').match(/^FY(\d+)-Q([1-4])$/);
+      return m ? { fy: Number(m[1]), q: Number(m[2]) } : null;
+    }
+
+    // Continuous month list — every month from earliest data → today,
+    // regardless of whether each month has entries. Lets the user navigate
+    // to any month, not only ones where something happened.
+    function continuousMonths(state) {
+      const dates = [
+        ...state.data.expenses.map(e => e.date),
+        ...state.data.income.map(i => i.date),
+        ...state.data.uncollected.map(u => u.date),
+        ...state.data.loans.map(l => l.date),
+      ].filter(Boolean);
+      const today = todayISO().slice(0, 7);
+      let min = today;
+      for (const d of dates) { const k = monthKey(d); if (k && k < min) min = k; }
+      const out = [];
+      let [y, m] = min.split('-').map(Number);
+      const [ey, em] = today.split('-').map(Number);
+      while (y < ey || (y === ey && m <= em)) {
+        out.push(`${y}-${String(m).padStart(2,'0')}`);
+        m += 1; if (m > 12) { m = 1; y += 1; }
+      }
+      // Always include the user's currently-selected month even if outside range
+      if (state.currentMonth && !out.includes(state.currentMonth)) out.push(state.currentMonth);
+      return out.sort();
+    }
+
+    function continuousFYs(state) {
+      const dates = [
+        ...state.data.expenses.map(e => e.date),
+        ...state.data.income.map(i => i.date),
+        ...state.data.uncollected.map(u => u.date),
+        ...state.data.loans.map(l => l.date),
+      ].filter(Boolean);
+      const today = currentFYNum();
+      let min = today;
+      for (const d of dates) { const f = fyFromISO(d); if (f && f < min) min = f; }
+      const out = [];
+      for (let f = min; f <= today; f++) out.push(f);
+      if (state.currentFY && !out.includes(state.currentFY)) out.push(state.currentFY);
+      return out.sort((a, b) => a - b);
+    }
+
+    function continuousQuarters(state) {
+      const dates = [
+        ...state.data.expenses.map(e => e.date),
+        ...state.data.income.map(i => i.date),
+        ...state.data.uncollected.map(u => u.date),
+        ...state.data.loans.map(l => l.date),
+      ].filter(Boolean);
+      const today = currentQuarter();
+      let earliest = today;
+      for (const d of dates) {
+        const x = quarterFromISO(d);
+        if (x && (x.fy < earliest.fy || (x.fy === earliest.fy && x.q < earliest.q))) earliest = x;
+      }
+      const out = [];
+      let cur = { ...earliest };
+      while (cur.fy < today.fy || (cur.fy === today.fy && cur.q <= today.q)) {
+        out.push({ fy: cur.fy, q: cur.q });
+        cur = cur.q === 4 ? { fy: cur.fy + 1, q: 1 } : { fy: cur.fy, q: cur.q + 1 };
+      }
+      const sel = state.currentQuarter;
+      if (sel && !out.find(o => o.fy === sel.fy && o.q === sel.q)) out.push({ ...sel });
+      out.sort((a, b) => a.fy === b.fy ? a.q - b.q : a.fy - b.fy);
+      return out;
+    }
+
     const fmt = (n, currency = 'AUD') => {
       const num = Number(n) || 0;
       try {
@@ -494,9 +609,10 @@
       data: loadData(),
       userName: loadUser(),
       tab: 'overview',
-      period: 'month',               // 'month' | 'fy'
+      period: 'month',               // 'month' | 'quarter' | 'fy'
       currentMonth: todayISO().slice(0, 7),
       currentFY: currentFYNum(),
+      currentQuarter: currentQuarter(),
       editingId: null,
       saving: false,
       filterExpense: 'all',          // 'all' or period key
@@ -1219,30 +1335,33 @@
       if (!PERIOD_TABS.has(state.tab)) return '';
       const modeToggle = `
         <div class="seg-toggle" role="tablist" aria-label="Period mode">
-          ${['month','fy'].map(m => {
+          ${['month','quarter','fy'].map(m => {
             const active = state.period === m;
+            const label = m === 'month' ? 'Month' : m === 'quarter' ? 'Quarter' : 'FY';
             return `<button data-action="set-period-mode" data-mode="${m}" role="tab" aria-selected="${active}" class="${active ? 'active' : ''}">
-              ${m === 'month' ? 'Month' : 'FY'}
+              ${label}
             </button>`;
           }).join('')}
         </div>`;
 
-      // Build period picker options
+      // Build period picker options for the active mode. Lists are continuous —
+      // every month / quarter / FY between earliest data and today, even if
+      // some buckets are empty, so the user can navigate freely.
       let picker;
       if (state.period === 'month') {
-        const set = new Set([state.currentMonth,
-          ...state.data.expenses.map(e => monthKey(e.date)),
-          ...state.data.income.map(i => monthKey(i.date))].filter(Boolean));
-        const opts = [...set].sort().reverse().map(m => {
+        const opts = continuousMonths(state).reverse().map(m => {
           const [y, mo] = m.split('-');
           return { value: m, label: `${MONTHS_FULL[Number(mo)-1]} ${y}` };
         });
         picker = dropdown({ id: 'period-picker', value: state.currentMonth, options: opts, action: 'pick-month', align: 'right', className: 'min-w-[180px]' });
+      } else if (state.period === 'quarter') {
+        const opts = continuousQuarters(state).slice().reverse().map(qObj => ({
+          value: `FY${qObj.fy}-Q${qObj.q}`, label: quarterDisplay(qObj)
+        }));
+        const curKey = `FY${state.currentQuarter.fy}-Q${state.currentQuarter.q}`;
+        picker = dropdown({ id: 'period-picker', value: curKey, options: opts, action: 'pick-quarter', align: 'right', className: 'min-w-[230px]' });
       } else {
-        const fySet = new Set([state.currentFY,
-          ...state.data.expenses.map(e => fyFromISO(e.date)),
-          ...state.data.income.map(i => fyFromISO(i.date))].filter(Boolean));
-        const opts = [...fySet].sort().reverse().map(n => ({ value: String(n), label: `FY${n}` }));
+        const opts = continuousFYs(state).slice().reverse().map(n => ({ value: String(n), label: `FY${n}` }));
         picker = dropdown({ id: 'period-picker', value: String(state.currentFY), options: opts, action: 'pick-fy', align: 'right', className: 'min-w-[140px]' });
       }
 
@@ -1274,30 +1393,54 @@
     // ============ Overview ============
     // Returns the list of months in the active period (6 for month view, 12 for FY view)
     // Each entry: { key: 'YYYY-MM', label: 'Jun', e: <expenses total>, inc: <income total>, active: bool }
+    // Trend chart bars:
+    //   Month   →  6 months ending at currentMonth
+    //   Quarter →  6 months ending at the quarter's last month
+    //   FY      → 12 months Jul..Jun of currentFY
     function trendBuckets() {
       const { expenses, income } = state.data;
       const buckets = [];
-      if (state.period === 'month') {
-        const [yy, mm] = state.currentMonth.split('-').map(Number);
-        for (let i = 5; i >= 0; i--) {
-          const d = new Date(yy, mm - 1 - i, 1);
-          const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-          const e = expenses.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
-          const inc = income.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
-          buckets.push({ key, label: MONTHS_SHORT[d.getMonth()], e, inc, active: key === state.currentMonth });
-        }
-      } else {
-        // 12-month FY strip (Jul .. Jun)
+      const sumKey = (key, list) =>
+        list.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
+
+      if (state.period === 'fy') {
         const n = state.currentFY;
         for (let i = 0; i < 12; i++) {
-          // month 0..11 maps to Jul..Jun of FY n
           const month = (6 + i) % 12; // Jul = 6
           const year = (i < 6) ? n - 1 : n;
           const key = `${year}-${String(month+1).padStart(2,'0')}`;
-          const e = expenses.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
-          const inc = income.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
-          buckets.push({ key, label: MONTHS_SHORT[month], e, inc, active: false });
+          buckets.push({ key, label: MONTHS_SHORT[month], e: sumKey(key, expenses), inc: sumKey(key, income), active: false });
         }
+        return buckets;
+      }
+
+      // Month + Quarter share the 6-month-trailing strip; just pick the
+      // anchor month differently.
+      let anchor;
+      if (state.period === 'quarter') {
+        const r = quarterRange(state.currentQuarter);
+        anchor = r.end.slice(0, 7); // last month of quarter
+      } else {
+        anchor = state.currentMonth;
+      }
+      const [ay, am] = anchor.split('-').map(Number);
+      const activeMonths = new Set();
+      if (state.period === 'quarter') {
+        const r = quarterRange(state.currentQuarter);
+        const [sy, sm] = r.start.split('-').map(Number);
+        for (let k = 0; k < 3; k++) {
+          const mm = sm - 1 + k;
+          const yy = sy + Math.floor(mm / 12);
+          const m = ((mm % 12) + 12) % 12;
+          activeMonths.add(`${yy}-${String(m+1).padStart(2,'0')}`);
+        }
+      } else {
+        activeMonths.add(anchor);
+      }
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(ay, am - 1 - i, 1);
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        buckets.push({ key, label: MONTHS_SHORT[d.getMonth()], e: sumKey(key, expenses), inc: sumKey(key, income), active: activeMonths.has(key) });
       }
       return buckets;
     }
@@ -1306,9 +1449,11 @@
       const { expenses, income, uncollected, loans, settings } = state.data;
       const cur = settings.currency;
 
-      const inPeriod = (iso) => state.period === 'month'
-        ? monthKey(iso) === state.currentMonth
-        : isoInFY(iso, state.currentFY);
+      const inPeriod = (iso) => {
+        if (state.period === 'month')   return monthKey(iso) === state.currentMonth;
+        if (state.period === 'quarter') return isoInQuarter(iso, state.currentQuarter);
+        return isoInFY(iso, state.currentFY);
+      };
 
       const periodExpenses = expenses.filter(e => inPeriod(e.date));
       const periodIncome   = income.filter(i => inPeriod(i.date));
@@ -1326,9 +1471,16 @@
       const trend = trendBuckets();
       const maxTrend = Math.max(1, ...trend.map(m => Math.max(m.e, m.inc)));
 
-      const periodLabel = state.period === 'month'
-        ? (() => { const [y, m] = state.currentMonth.split('-').map(Number); return `${MONTHS_FULL[m-1]} ${y}`; })()
-        : `FY${state.currentFY}`;
+      const periodLabel = (() => {
+        if (state.period === 'month') {
+          const [y, m] = state.currentMonth.split('-').map(Number);
+          return `${MONTHS_FULL[m-1]} ${y}`;
+        }
+        if (state.period === 'quarter') {
+          return quarterDisplay(state.currentQuarter);
+        }
+        return `FY${state.currentFY}`;
+      })();
 
       const recent = [
         ...periodExpenses.map(x => ({ ...x, _type: 'expense' })),
@@ -1369,7 +1521,7 @@
             <div class="text-[32px] font-medium tabular-nums leading-none font-mono ${net >= 0 ? 'text-stone-50' : 'text-red-300'}">
               ${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), cur))}
             </div>
-            <div class="text-xs text-stone-400 mt-2">${state.period === 'month' ? 'After expenses this month' : 'After expenses this FY'}</div>
+            <div class="text-xs text-stone-400 mt-2">${({ month: 'After expenses this month', quarter: 'After expenses this quarter', fy: 'After expenses this FY' })[state.period]}</div>
           `, 'p-6', 'background: linear-gradient(135deg, rgba(200,184,239,0.10) 0%, rgba(200,184,239,0.02) 100%), var(--surface-raised); box-shadow: inset 0 0 0 1px rgba(200,184,239,0.18), var(--shadow-card);')}
         </div>`;
 
@@ -1377,7 +1529,7 @@
         <div class="flex items-start justify-between gap-4 mb-5">
           <div>
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Partner split</div>
-            <h2 class="font-serif text-2xl font-light text-stone-900">${state.period === 'month' ? 'End of month distribution' : 'End of FY distribution'}</h2>
+            <h2 class="font-serif text-2xl font-light text-stone-900">${({ month: 'End of month distribution', quarter: 'End of quarter distribution', fy: 'End of FY distribution' })[state.period]}</h2>
           </div>
           <div class="text-xs text-stone-500 text-right"><div>${settings.splitA}% / ${settings.splitB}%</div></div>
         </div>
@@ -1413,7 +1565,7 @@
 
       const trendCard = card(`
         <div class="flex items-center justify-between mb-5">
-          <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500">${state.period === 'month' ? 'Six month trend' : 'Twelve month trend'}</div>
+          <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500">${state.period === 'fy' ? 'Twelve month trend' : 'Six month trend'}</div>
           <div class="flex items-center gap-4 text-[11px] text-stone-600">
             <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:var(--expense);"></div>Expenses</div>
             <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:var(--income);"></div>Income</div>
@@ -1517,8 +1669,7 @@
       const filter = state[filterKey];
       const sortBy = state[sortKey];
 
-      // Build filter options — in month mode: All + each month seen in data.
-      // In FY mode: All + each FY seen in data.
+      // Filter options match the active period mode (Month | Quarter | FY).
       let filterOptions;
       if (state.period === 'month') {
         const set = new Set(list.map(x => monthKey(x.date)).filter(Boolean));
@@ -1526,6 +1677,14 @@
           const [y, mo] = m.split('-');
           return { value: m, label: `${MONTHS_FULL[Number(mo)-1]} ${y}` };
         })];
+      } else if (state.period === 'quarter') {
+        const seen = new Map();
+        for (const x of list) {
+          const q = quarterFromISO(x.date);
+          if (q) seen.set(q.key, q);
+        }
+        const sorted = [...seen.values()].sort((a, b) => a.fy === b.fy ? b.q - a.q : b.fy - a.fy);
+        filterOptions = [{ value: 'all', label: 'All quarters' }, ...sorted.map(q => ({ value: q.key, label: quarterDisplay(q) }))];
       } else {
         const set = new Set(list.map(x => fyFromISO(x.date)).filter(Boolean));
         filterOptions = [{ value: 'all', label: 'All FY' }, ...[...set].sort((a,b)=>b-a).map(n => ({ value: `FY${n}`, label: `FY${n}` }))];
@@ -1536,6 +1695,9 @@
       if (filter !== 'all') {
         if (state.period === 'month') {
           filtered = filtered.filter(x => monthKey(x.date) === filter);
+        } else if (state.period === 'quarter') {
+          const q = quarterFromKey(filter);
+          if (q) filtered = filtered.filter(x => isoInQuarter(x.date, q));
         } else {
           const fyNum = Number(filter.replace(/^FY/, ''));
           filtered = filtered.filter(x => fyFromISO(x.date) === fyNum);
@@ -2083,13 +2245,16 @@
       const { expenses, income, settings } = state.data;
       const { currency, partnerA, partnerB, splitA, splitB, gstEnabled, gstRate } = settings;
 
-      // FY selection: Tax tab always uses the FY picker.
-      // If user arrived from month mode, default to the FY that contains state.currentMonth.
-      const fyForMonth = (() => {
+      // Tax/EOFY is inherently FY-grain. Derive a target FY from whichever
+      // period is active so we don't surprise the user — FY mode uses the
+      // selected FY, Quarter uses the quarter's FY, Month uses the FY that
+      // contains currentMonth.
+      const targetFY = (() => {
+        if (state.period === 'fy') return state.currentFY;
+        if (state.period === 'quarter') return state.currentQuarter.fy;
         const [y, m] = (state.currentMonth || '').split('-').map(Number);
         return m >= 7 ? y + 1 : y;
       })();
-      const targetFY = state.period === 'fy' ? state.currentFY : fyForMonth;
 
       const fyIncome = income.filter(i => isoInFY(i.date, targetFY));
       const fyExpenses = expenses.filter(e => isoInFY(e.date, targetFY));
@@ -2342,9 +2507,10 @@
       return t;
     }
 
-    // Resolve the FY in play for Tax-tab operations (FY picker or derived from month)
+    // Resolve the FY in play for Tax-tab operations regardless of period mode.
     function taxActiveFY() {
       if (state.period === 'fy') return state.currentFY;
+      if (state.period === 'quarter') return state.currentQuarter.fy;
       const [y, m] = (state.currentMonth || '').split('-').map(Number);
       return m >= 7 ? y + 1 : y;
     }
@@ -3309,9 +3475,13 @@
         return render();
       }
 
-      // Period mode toggle
+      // Period mode toggle. Filters keyed by the previous mode would silently
+      // evaluate to no matches in the new mode, so reset both ledger filters
+      // back to "all" whenever the mode changes.
       if (action === 'set-period-mode') {
         state.period = el.dataset.mode;
+        state.filterExpense = 'all';
+        state.filterIncome  = 'all';
         closeAllDropdowns();
         return render();
       }
@@ -3361,6 +3531,11 @@
       // Period picker selections (fired via dd-select forwarding)
       if (action === 'pick-month') { state.currentMonth = el.dataset.value; return render(); }
       if (action === 'pick-fy')    { state.currentFY = Number(el.dataset.value); return render(); }
+      if (action === 'pick-quarter') {
+        const q = quarterFromKey(el.dataset.value);
+        if (q) state.currentQuarter = q;
+        return render();
+      }
 
       // Number field +/– step
       if (action === 'num-step') {
