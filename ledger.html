@@ -299,6 +299,121 @@
       return iso >= r.start && iso <= r.end;
     };
 
+    // Quarters use AU financial-year quarters:
+    //   Q1: Jul–Sep  Q2: Oct–Dec  Q3: Jan–Mar  Q4: Apr–Jun
+    // Numbered by the FY they belong to (the FY containing 1 Jul start).
+    // Key format: 'FY{year}-Q{n}' — 'FY2026-Q1' = Jul–Sep 2025.
+    function quarterFromISO(iso) {
+      if (!iso) return null;
+      const [y, m] = iso.split('-').map(Number);
+      let fy, q;
+      if (m >= 7 && m <= 9)        { fy = y + 1; q = 1; }
+      else if (m >= 10 && m <= 12) { fy = y + 1; q = 2; }
+      else if (m >= 1 && m <= 3)   { fy = y;     q = 3; }
+      else                         { fy = y;     q = 4; }
+      return { fy, q, key: `FY${fy}-Q${q}` };
+    }
+    const quarterKey = (iso) => { const x = quarterFromISO(iso); return x ? x.key : ''; };
+    const currentQuarter = () => quarterFromISO(todayISO());
+
+    function quarterRange({ fy, q }) {
+      const map = {
+        1: [`${fy-1}-07-01`, `${fy-1}-09-30`],
+        2: [`${fy-1}-10-01`, `${fy-1}-12-31`],
+        3: [`${fy}-01-01`,   `${fy}-03-31`],
+        4: [`${fy}-04-01`,   `${fy}-06-30`],
+      };
+      const [start, end] = map[q];
+      return { start, end };
+    }
+    function isoInQuarter(iso, qObj) {
+      if (!iso || !qObj) return false;
+      const r = quarterRange(qObj);
+      return iso >= r.start && iso <= r.end;
+    }
+    function previousQuarter({ fy, q }) {
+      if (q === 1) return { fy: fy - 1, q: 4 };
+      return { fy, q: q - 1 };
+    }
+    function quarterShort({ fy, q }) {
+      const labels = { 1: 'Jul–Sep', 2: 'Oct–Dec', 3: 'Jan–Mar', 4: 'Apr–Jun' };
+      const yearShown = q < 3 ? fy - 1 : fy;
+      return `${labels[q]} ${yearShown}`;
+    }
+    function quarterDisplay({ fy, q }) {
+      return `Q${q} FY${fy} · ${quarterShort({ fy, q })}`;
+    }
+    function quarterFromKey(key) {
+      const m = (key || '').match(/^FY(\d+)-Q([1-4])$/);
+      return m ? { fy: Number(m[1]), q: Number(m[2]) } : null;
+    }
+
+    // Continuous month list — every month from earliest data → today,
+    // regardless of whether each month has entries. Lets the user navigate
+    // to any month, not only ones where something happened.
+    function continuousMonths(state) {
+      const dates = [
+        ...state.data.expenses.map(e => e.date),
+        ...state.data.income.map(i => i.date),
+        ...state.data.uncollected.map(u => u.date),
+        ...state.data.loans.map(l => l.date),
+      ].filter(Boolean);
+      const today = todayISO().slice(0, 7);
+      let min = today;
+      for (const d of dates) { const k = monthKey(d); if (k && k < min) min = k; }
+      const out = [];
+      let [y, m] = min.split('-').map(Number);
+      const [ey, em] = today.split('-').map(Number);
+      while (y < ey || (y === ey && m <= em)) {
+        out.push(`${y}-${String(m).padStart(2,'0')}`);
+        m += 1; if (m > 12) { m = 1; y += 1; }
+      }
+      // Always include the user's currently-selected month even if outside range
+      if (state.currentMonth && !out.includes(state.currentMonth)) out.push(state.currentMonth);
+      return out.sort();
+    }
+
+    function continuousFYs(state) {
+      const dates = [
+        ...state.data.expenses.map(e => e.date),
+        ...state.data.income.map(i => i.date),
+        ...state.data.uncollected.map(u => u.date),
+        ...state.data.loans.map(l => l.date),
+      ].filter(Boolean);
+      const today = currentFYNum();
+      let min = today;
+      for (const d of dates) { const f = fyFromISO(d); if (f && f < min) min = f; }
+      const out = [];
+      for (let f = min; f <= today; f++) out.push(f);
+      if (state.currentFY && !out.includes(state.currentFY)) out.push(state.currentFY);
+      return out.sort((a, b) => a - b);
+    }
+
+    function continuousQuarters(state) {
+      const dates = [
+        ...state.data.expenses.map(e => e.date),
+        ...state.data.income.map(i => i.date),
+        ...state.data.uncollected.map(u => u.date),
+        ...state.data.loans.map(l => l.date),
+      ].filter(Boolean);
+      const today = currentQuarter();
+      let earliest = today;
+      for (const d of dates) {
+        const x = quarterFromISO(d);
+        if (x && (x.fy < earliest.fy || (x.fy === earliest.fy && x.q < earliest.q))) earliest = x;
+      }
+      const out = [];
+      let cur = { ...earliest };
+      while (cur.fy < today.fy || (cur.fy === today.fy && cur.q <= today.q)) {
+        out.push({ fy: cur.fy, q: cur.q });
+        cur = cur.q === 4 ? { fy: cur.fy + 1, q: 1 } : { fy: cur.fy, q: cur.q + 1 };
+      }
+      const sel = state.currentQuarter;
+      if (sel && !out.find(o => o.fy === sel.fy && o.q === sel.q)) out.push({ ...sel });
+      out.sort((a, b) => a.fy === b.fy ? a.q - b.q : a.fy - b.fy);
+      return out;
+    }
+
     const fmt = (n, currency = 'AUD') => {
       const num = Number(n) || 0;
       try {
@@ -494,15 +609,17 @@
       data: loadData(),
       userName: loadUser(),
       tab: 'overview',
-      period: 'month',               // 'month' | 'fy'
+      period: 'month',               // 'month' | 'quarter' | 'fy'
       currentMonth: todayISO().slice(0, 7),
       currentFY: currentFYNum(),
+      currentQuarter: currentQuarter(),
       editingId: null,
       saving: false,
       filterExpense: 'all',          // 'all' or period key
       filterIncome: 'all',
       sortExpense: { field: 'date', dir: 'desc' },
-      sortIncome: { field: 'date', dir: 'desc' }
+      sortIncome: { field: 'date', dir: 'desc' },
+      sortCustomers: { field: 'net', dir: 'desc' }
     };
 
     // Stamp an entry with editedBy + editedAt (from current userName, if set)
@@ -1004,7 +1121,11 @@
       arrowDownRight: '<path d="m7 7 10 10"/><path d="M17 7v10H7"/>',
       fileText: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/>',
       printer: '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V2h12v7"/><rect width="12" height="8" x="6" y="14"/>',
-      calculator: '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>'
+      calculator: '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>',
+      users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+      trendingUp: '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+      trendingDown: '<polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/>',
+      sparkle: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .963L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>'
     };
     function icon(name, size = 16, extraClass = '') {
       const path = ICON_PATHS[name] || '';
@@ -1137,16 +1258,22 @@
       { id: 'overview',    label: 'Overview',    icon: 'layoutDashboard' },
       { id: 'expenses',    label: 'Expenses',    icon: 'receipt' },
       { id: 'income',      label: 'Income',      icon: 'banknote' },
+      { id: 'customers',   label: 'Customers',   icon: 'users' },
       { id: 'uncollected', label: 'Uncollected', icon: 'clock' },
       { id: 'loans',       label: 'Loans',       icon: 'handCoins' },
       { id: 'tax',         label: 'Tax',         icon: 'calculator' },
       { id: 'settings',    label: 'Settings',    icon: 'settings' }
     ];
 
-    // Mobile bottom bar shows a slimmed-down set; the rest are reachable via More (Settings covers it).
-    const MOBILE_TABS = ['overview', 'expenses', 'income', 'tax', 'settings'];
+    // Mobile bottom bar — five most-frequent destinations.
+    // Customers replaces Income on mobile because Customers IS the rolled-up
+    // income view; per-row income editing happens on desktop. Tax stays so
+    // EOFY pack is reachable on phone. Loans / Uncollected / Settings via the
+    // gear or via /ledger/ledger.html#settings (Settings is the 5th).
+    const MOBILE_TABS = ['overview', 'expenses', 'customers', 'tax', 'settings'];
 
     // Which tabs show the month/FY period selector in the header.
+    // Customers is lifetime-grain so doesn't get the period strip.
     const PERIOD_TABS = new Set(['overview', 'expenses', 'income', 'tax']);
 
     function sidebar() {
@@ -1219,30 +1346,33 @@
       if (!PERIOD_TABS.has(state.tab)) return '';
       const modeToggle = `
         <div class="seg-toggle" role="tablist" aria-label="Period mode">
-          ${['month','fy'].map(m => {
+          ${['month','quarter','fy'].map(m => {
             const active = state.period === m;
+            const label = m === 'month' ? 'Month' : m === 'quarter' ? 'Quarter' : 'FY';
             return `<button data-action="set-period-mode" data-mode="${m}" role="tab" aria-selected="${active}" class="${active ? 'active' : ''}">
-              ${m === 'month' ? 'Month' : 'FY'}
+              ${label}
             </button>`;
           }).join('')}
         </div>`;
 
-      // Build period picker options
+      // Build period picker options for the active mode. Lists are continuous —
+      // every month / quarter / FY between earliest data and today, even if
+      // some buckets are empty, so the user can navigate freely.
       let picker;
       if (state.period === 'month') {
-        const set = new Set([state.currentMonth,
-          ...state.data.expenses.map(e => monthKey(e.date)),
-          ...state.data.income.map(i => monthKey(i.date))].filter(Boolean));
-        const opts = [...set].sort().reverse().map(m => {
+        const opts = continuousMonths(state).reverse().map(m => {
           const [y, mo] = m.split('-');
           return { value: m, label: `${MONTHS_FULL[Number(mo)-1]} ${y}` };
         });
         picker = dropdown({ id: 'period-picker', value: state.currentMonth, options: opts, action: 'pick-month', align: 'right', className: 'min-w-[180px]' });
+      } else if (state.period === 'quarter') {
+        const opts = continuousQuarters(state).slice().reverse().map(qObj => ({
+          value: `FY${qObj.fy}-Q${qObj.q}`, label: quarterDisplay(qObj)
+        }));
+        const curKey = `FY${state.currentQuarter.fy}-Q${state.currentQuarter.q}`;
+        picker = dropdown({ id: 'period-picker', value: curKey, options: opts, action: 'pick-quarter', align: 'right', className: 'min-w-[230px]' });
       } else {
-        const fySet = new Set([state.currentFY,
-          ...state.data.expenses.map(e => fyFromISO(e.date)),
-          ...state.data.income.map(i => fyFromISO(i.date))].filter(Boolean));
-        const opts = [...fySet].sort().reverse().map(n => ({ value: String(n), label: `FY${n}` }));
+        const opts = continuousFYs(state).slice().reverse().map(n => ({ value: String(n), label: `FY${n}` }));
         picker = dropdown({ id: 'period-picker', value: String(state.currentFY), options: opts, action: 'pick-fy', align: 'right', className: 'min-w-[140px]' });
       }
 
@@ -1274,30 +1404,54 @@
     // ============ Overview ============
     // Returns the list of months in the active period (6 for month view, 12 for FY view)
     // Each entry: { key: 'YYYY-MM', label: 'Jun', e: <expenses total>, inc: <income total>, active: bool }
+    // Trend chart bars:
+    //   Month   →  6 months ending at currentMonth
+    //   Quarter →  6 months ending at the quarter's last month
+    //   FY      → 12 months Jul..Jun of currentFY
     function trendBuckets() {
       const { expenses, income } = state.data;
       const buckets = [];
-      if (state.period === 'month') {
-        const [yy, mm] = state.currentMonth.split('-').map(Number);
-        for (let i = 5; i >= 0; i--) {
-          const d = new Date(yy, mm - 1 - i, 1);
-          const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-          const e = expenses.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
-          const inc = income.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
-          buckets.push({ key, label: MONTHS_SHORT[d.getMonth()], e, inc, active: key === state.currentMonth });
-        }
-      } else {
-        // 12-month FY strip (Jul .. Jun)
+      const sumKey = (key, list) =>
+        list.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
+
+      if (state.period === 'fy') {
         const n = state.currentFY;
         for (let i = 0; i < 12; i++) {
-          // month 0..11 maps to Jul..Jun of FY n
           const month = (6 + i) % 12; // Jul = 6
           const year = (i < 6) ? n - 1 : n;
           const key = `${year}-${String(month+1).padStart(2,'0')}`;
-          const e = expenses.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
-          const inc = income.filter(x => monthKey(x.date) === key).reduce((s, x) => s + parseAmount(x.amount), 0);
-          buckets.push({ key, label: MONTHS_SHORT[month], e, inc, active: false });
+          buckets.push({ key, label: MONTHS_SHORT[month], e: sumKey(key, expenses), inc: sumKey(key, income), active: false });
         }
+        return buckets;
+      }
+
+      // Month + Quarter share the 6-month-trailing strip; just pick the
+      // anchor month differently.
+      let anchor;
+      if (state.period === 'quarter') {
+        const r = quarterRange(state.currentQuarter);
+        anchor = r.end.slice(0, 7); // last month of quarter
+      } else {
+        anchor = state.currentMonth;
+      }
+      const [ay, am] = anchor.split('-').map(Number);
+      const activeMonths = new Set();
+      if (state.period === 'quarter') {
+        const r = quarterRange(state.currentQuarter);
+        const [sy, sm] = r.start.split('-').map(Number);
+        for (let k = 0; k < 3; k++) {
+          const mm = sm - 1 + k;
+          const yy = sy + Math.floor(mm / 12);
+          const m = ((mm % 12) + 12) % 12;
+          activeMonths.add(`${yy}-${String(m+1).padStart(2,'0')}`);
+        }
+      } else {
+        activeMonths.add(anchor);
+      }
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(ay, am - 1 - i, 1);
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        buckets.push({ key, label: MONTHS_SHORT[d.getMonth()], e: sumKey(key, expenses), inc: sumKey(key, income), active: activeMonths.has(key) });
       }
       return buckets;
     }
@@ -1306,9 +1460,11 @@
       const { expenses, income, uncollected, loans, settings } = state.data;
       const cur = settings.currency;
 
-      const inPeriod = (iso) => state.period === 'month'
-        ? monthKey(iso) === state.currentMonth
-        : isoInFY(iso, state.currentFY);
+      const inPeriod = (iso) => {
+        if (state.period === 'month')   return monthKey(iso) === state.currentMonth;
+        if (state.period === 'quarter') return isoInQuarter(iso, state.currentQuarter);
+        return isoInFY(iso, state.currentFY);
+      };
 
       const periodExpenses = expenses.filter(e => inPeriod(e.date));
       const periodIncome   = income.filter(i => inPeriod(i.date));
@@ -1326,9 +1482,16 @@
       const trend = trendBuckets();
       const maxTrend = Math.max(1, ...trend.map(m => Math.max(m.e, m.inc)));
 
-      const periodLabel = state.period === 'month'
-        ? (() => { const [y, m] = state.currentMonth.split('-').map(Number); return `${MONTHS_FULL[m-1]} ${y}`; })()
-        : `FY${state.currentFY}`;
+      const periodLabel = (() => {
+        if (state.period === 'month') {
+          const [y, m] = state.currentMonth.split('-').map(Number);
+          return `${MONTHS_FULL[m-1]} ${y}`;
+        }
+        if (state.period === 'quarter') {
+          return quarterDisplay(state.currentQuarter);
+        }
+        return `FY${state.currentFY}`;
+      })();
 
       const recent = [
         ...periodExpenses.map(x => ({ ...x, _type: 'expense' })),
@@ -1369,7 +1532,7 @@
             <div class="text-[32px] font-medium tabular-nums leading-none font-mono ${net >= 0 ? 'text-stone-50' : 'text-red-300'}">
               ${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), cur))}
             </div>
-            <div class="text-xs text-stone-400 mt-2">${state.period === 'month' ? 'After expenses this month' : 'After expenses this FY'}</div>
+            <div class="text-xs text-stone-400 mt-2">${({ month: 'After expenses this month', quarter: 'After expenses this quarter', fy: 'After expenses this FY' })[state.period]}</div>
           `, 'p-6', 'background: linear-gradient(135deg, rgba(200,184,239,0.10) 0%, rgba(200,184,239,0.02) 100%), var(--surface-raised); box-shadow: inset 0 0 0 1px rgba(200,184,239,0.18), var(--shadow-card);')}
         </div>`;
 
@@ -1377,7 +1540,7 @@
         <div class="flex items-start justify-between gap-4 mb-5">
           <div>
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Partner split</div>
-            <h2 class="font-serif text-2xl font-light text-stone-900">${state.period === 'month' ? 'End of month distribution' : 'End of FY distribution'}</h2>
+            <h2 class="font-serif text-2xl font-light text-stone-900">${({ month: 'End of month distribution', quarter: 'End of quarter distribution', fy: 'End of FY distribution' })[state.period]}</h2>
           </div>
           <div class="text-xs text-stone-500 text-right"><div>${settings.splitA}% / ${settings.splitB}%</div></div>
         </div>
@@ -1413,7 +1576,7 @@
 
       const trendCard = card(`
         <div class="flex items-center justify-between mb-5">
-          <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500">${state.period === 'month' ? 'Six month trend' : 'Twelve month trend'}</div>
+          <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500">${state.period === 'fy' ? 'Twelve month trend' : 'Six month trend'}</div>
           <div class="flex items-center gap-4 text-[11px] text-stone-600">
             <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:var(--expense);"></div>Expenses</div>
             <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:var(--income);"></div>Income</div>
@@ -1476,6 +1639,9 @@
         </div>
       `, 'p-6');
 
+      const gstCard = settings.gstEnabled ? basPreviewCard() : gstThresholdCard();
+      const insightsCard = whatChangedCard();
+
       return `
         <div class="space-y-6">
           <div>
@@ -1483,6 +1649,8 @@
             <h1 class="font-serif text-4xl md:text-5xl font-light text-stone-900 leading-[1.05]">${esc(periodLabel)}</h1>
           </div>
           ${summaryRow}
+          ${insightsCard}
+          ${gstCard}
           ${splitCard}
           <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
             ${trendCard}
@@ -1491,6 +1659,339 @@
           ${recentCard}
         </div>`;
     }
+
+    // ============ "What changed" insights feed ============
+    // Plain-English bullets generated from a small rule set. Each rule may
+    // skip itself when its threshold isn't met. Always returns ≤5; falls
+    // back to a soft summary if nothing pops.
+    function generateInsights() {
+      const out = [];
+      const cur = state.data.settings.currency;
+      const today = todayISO();
+      const todayDate = new Date(today);
+
+      // ---- Rule 1: GST threshold proximity (only above $50k rolling) ----
+      const rolling = rollingGrossIncome();
+      if (!state.data.settings.gstEnabled && rolling >= 50000) {
+        if (rolling >= GST_THRESHOLD) {
+          out.push({
+            icon: 'sparkle', tone: 'danger',
+            text: `<strong>You've crossed the GST threshold.</strong> Rolling 12-month gross is ${esc(fmt(rolling, cur))}. Register for GST within 21 days.`
+          });
+        } else {
+          const remaining = GST_THRESHOLD - rolling;
+          out.push({
+            icon: 'sparkle', tone: rolling >= 70000 ? 'danger' : 'warn',
+            text: `Rolling 12-month gross is <strong>${esc(fmt(rolling, cur))}</strong> — <strong>${esc(fmt(remaining, cur))}</strong> from the GST threshold.`
+          });
+        }
+      }
+
+      // ---- Rule 2: vendor with biggest MoM increase ----
+      // Compares the calendar month containing today vs the prior calendar
+      // month, so this surface in the feed regardless of what period the
+      // user is currently viewing.
+      const thisMonthKey = monthKey(today);
+      const prevMonthDate = new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1);
+      const prevMonthKey = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth()+1).padStart(2,'0')}`;
+      const groupExp = (key) => {
+        const m = new Map();
+        for (const e of state.data.expenses) {
+          if (monthKey(e.date) !== key) continue;
+          const k = (e.vendor || '').trim().toLowerCase();
+          if (!k) continue;
+          const cur = m.get(k) || { label: e.vendor.trim(), total: 0 };
+          cur.total += parseAmount(e.amount);
+          m.set(k, cur);
+        }
+        return m;
+      };
+      const cur_v = groupExp(thisMonthKey);
+      const prev_v = groupExp(prevMonthKey);
+      let topJump = null;
+      for (const [k, v] of cur_v) {
+        const prev = prev_v.get(k);
+        if (!prev) continue;
+        const delta = v.total - prev.total;
+        if (prev.total < 50 || delta < 50) continue; // ignore noise
+        const pct = (delta / prev.total) * 100;
+        if (pct < 25) continue;
+        if (!topJump || delta > topJump.delta) topJump = { label: v.label, prev: prev.total, now: v.total, delta, pct };
+      }
+      if (topJump) {
+        out.push({
+          icon: 'trendingUp', tone: 'warn',
+          text: `<strong>${esc(topJump.label)}</strong> spend is up <strong>${topJump.pct.toFixed(0)}%</strong> this month (${esc(fmt(topJump.prev, cur))} → ${esc(fmt(topJump.now, cur))}).`
+        });
+      }
+
+      // ---- Rule 3: best revenue month (positive income only) ----
+      const monthRevenue = new Map();
+      for (const i of state.data.income) {
+        const a = parseAmount(i.amount);
+        if (a <= 0) continue;
+        const k = monthKey(i.date);
+        if (!k) continue;
+        monthRevenue.set(k, (monthRevenue.get(k) || 0) + a);
+      }
+      if (monthRevenue.size >= 2) {
+        const sorted = [...monthRevenue.entries()].sort((a, b) => b[1] - a[1]);
+        const [bestKey, bestTotal] = sorted[0];
+        const [y, m] = bestKey.split('-').map(Number);
+        const monthName = `${MONTHS_FULL[m - 1]} ${y}`;
+        if (bestKey === thisMonthKey) {
+          out.push({
+            icon: 'sparkle', tone: 'income',
+            text: `<strong>${esc(monthName)} is your best revenue month so far</strong> — ${esc(fmt(bestTotal, cur))} gross.`
+          });
+        } else {
+          // Only mention if best month was within the last 6 months and is meaningfully bigger
+          const cutoff = new Date(todayDate.getFullYear(), todayDate.getMonth() - 5, 1);
+          const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth()+1).padStart(2,'0')}`;
+          if (bestKey >= cutoffKey) {
+            const second = sorted[1] ? sorted[1][1] : 0;
+            const margin = second > 0 ? ((bestTotal / second) - 1) * 100 : 0;
+            if (margin >= 5) {
+              out.push({
+                icon: 'sparkle', tone: 'income',
+                text: `<strong>${esc(monthName)}</strong> was your best recent month — ${esc(fmt(bestTotal, cur))} gross${margin >= 5 ? `, ${margin.toFixed(0)}% above the next` : ''}.`
+              });
+            }
+          }
+        }
+      }
+
+      // ---- Rule 4: 30-day net cash flow ----
+      const thirtyAgo = new Date(todayDate); thirtyAgo.setDate(thirtyAgo.getDate() - 30);
+      const cutoff30 = thirtyAgo.toISOString().slice(0, 10);
+      let inc30 = 0, exp30 = 0, nIn = 0, nOut = 0;
+      for (const i of state.data.income) {
+        if (i.date >= cutoff30 && i.date <= today) {
+          const a = parseAmount(i.amount);
+          if (a >= 0) inc30 += a;
+          else inc30 += a; // refunds reduce inflow
+          nIn++;
+        }
+      }
+      for (const e of state.data.expenses) {
+        if (e.date >= cutoff30 && e.date <= today) { exp30 += parseAmount(e.amount); nOut++; }
+      }
+      const net30 = inc30 - exp30;
+      if (nIn + nOut > 0) {
+        if (net30 >= 0) {
+          out.push({
+            icon: 'trendingUp', tone: 'income',
+            text: `Last 30 days: <strong>${esc(fmt(net30, cur))} cash flow positive</strong> (${esc(fmt(inc30, cur))} in, ${esc(fmt(exp30, cur))} out).`
+          });
+        } else {
+          out.push({
+            icon: 'trendingDown', tone: 'danger',
+            text: `Last 30 days: <strong>${esc(fmt(Math.abs(net30), cur))} cash flow negative</strong> (${esc(fmt(inc30, cur))} in, ${esc(fmt(exp30, cur))} out).`
+          });
+        }
+      }
+
+      // Soft fallback if no rule fired
+      if (out.length === 0) {
+        const totalIncome = state.data.income.filter(i => parseAmount(i.amount) > 0).reduce((s, i) => s + parseAmount(i.amount), 0);
+        out.push({ icon: 'sparkle', tone: 'muted', text: `Lifetime gross income: <strong>${esc(fmt(totalIncome, cur))}</strong> across ${state.data.income.filter(i => parseAmount(i.amount) > 0).length} payments.` });
+      }
+
+      return out.slice(0, 5);
+    }
+
+    function whatChangedCard() {
+      const insights = generateInsights();
+      if (insights.length === 0) return '';
+      const toneColor = (t) => ({
+        danger: 'var(--danger)', warn: 'var(--warn)',
+        income: 'var(--income)', muted: 'var(--text-muted)'
+      })[t] || 'var(--text-muted)';
+      const items = insights.map(i => `
+        <div class="flex items-start gap-3 py-3 first:pt-0 last:pb-0" style="border-bottom: 1px solid var(--border);">
+          <div class="w-7 h-7 flex-shrink-0 rounded-xl flex items-center justify-center mt-0.5" style="background-color: var(--surface-2); color: ${toneColor(i.tone)};">
+            ${icon(i.icon, 13)}
+          </div>
+          <div class="text-sm text-stone-700 leading-relaxed">${i.text}</div>
+        </div>
+      `).join('');
+
+      return card(`
+        <div class="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">What changed</div>
+            <h2 class="font-serif text-xl font-light text-stone-900">Worth knowing</h2>
+          </div>
+        </div>
+        <div class="space-y-0">${items}</div>
+        <div class="text-[10px] text-stone-500 mt-3">Auto-generated from this device's data — won't surface anything that needs the cloud.</div>
+      `, 'p-6');
+    }
+
+    // ============ GST threshold + BAS preview ============
+    // ATO Section 188-15 — "GST turnover" is the value of supplies made
+    // (gross), not net of refunds. We sum positive income only.
+    const GST_THRESHOLD = 75000;
+
+    function rollingGrossIncome(refDateISO = todayISO()) {
+      const ref = new Date(refDateISO);
+      const cutoff = new Date(ref);
+      cutoff.setFullYear(cutoff.getFullYear() - 1);
+      const c = cutoff.toISOString().slice(0, 10);
+      let total = 0;
+      for (const i of state.data.income) {
+        const a = parseAmount(i.amount);
+        if (a <= 0) continue;
+        if (i.date >= c && i.date <= refDateISO) total += a;
+      }
+      return total;
+    }
+
+    function avgMonthlyGross(months = 3, refDateISO = todayISO()) {
+      const ref = new Date(refDateISO);
+      let total = 0, monthsCounted = 0;
+      for (let i = 1; i <= months; i++) {
+        const d = new Date(ref.getFullYear(), ref.getMonth() - i, 1);
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        let m = 0;
+        for (const x of state.data.income) {
+          const a = parseAmount(x.amount);
+          if (a > 0 && monthKey(x.date) === key) m += a;
+        }
+        total += m; monthsCounted++;
+      }
+      return monthsCounted ? total / monthsCounted : 0;
+    }
+
+    function gstThresholdCard() {
+      const cur = state.data.settings.currency;
+      const rolling = rollingGrossIncome();
+      const pct = Math.min(100, (rolling / GST_THRESHOLD) * 100);
+
+      let level, color, message;
+      if (rolling >= GST_THRESHOLD) {
+        level = 'over';
+        color = { bg: 'var(--danger-bg)', fg: 'var(--danger)', bar: 'var(--danger)' };
+        message = 'Threshold crossed — register for GST within 21 days.';
+      } else if (rolling >= 70000) {
+        level = 'critical';
+        color = { bg: 'var(--danger-bg)', fg: 'var(--danger)', bar: 'var(--danger)' };
+        message = 'Approaching threshold — talk to your accountant about timing.';
+      } else if (rolling >= 60000) {
+        level = 'warn';
+        color = { bg: 'rgba(217,194,138,0.12)', fg: 'var(--warn)', bar: 'var(--warn)' };
+        message = 'Watch carefully — review monthly.';
+      } else {
+        level = 'ok';
+        color = { bg: 'var(--income-bg)', fg: 'var(--income)', bar: 'var(--income)' };
+        message = 'Well under threshold.';
+      }
+
+      // Project months until $75k crosses, using last 3 months' average.
+      const remaining = Math.max(0, GST_THRESHOLD - rolling);
+      const avgM = avgMonthlyGross(3);
+      let projection = '';
+      if (rolling >= GST_THRESHOLD) {
+        projection = '';
+      } else if (avgM <= 0) {
+        projection = '<span class="text-stone-500">No recent income — can\'t project crossing.</span>';
+      } else {
+        const months = Math.ceil(remaining / avgM);
+        projection = months >= 24
+          ? `At the recent pace (~${esc(fmt(avgM, cur))}/mo) the threshold is more than 24 months away.`
+          : `At the recent pace (~${esc(fmt(avgM, cur))}/mo) the threshold is about <strong class="text-stone-800">${months} ${months === 1 ? 'month' : 'months'}</strong> away.`;
+      }
+
+      return card(`
+        <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">GST registration threshold</div>
+            <h2 class="font-serif text-2xl font-light text-stone-900">Rolling 12-month gross</h2>
+            <div class="text-xs text-stone-500 mt-1">ATO threshold for compulsory GST registration is ${esc(fmt(GST_THRESHOLD, cur))} of gross supplies.</div>
+          </div>
+          <div class="text-right">
+            <div class="text-[28px] font-medium text-stone-900 tabular-nums font-mono leading-none">${esc(fmt(rolling, cur))}</div>
+            <div class="text-xs mt-1" style="color: ${color.fg};">${esc(message)}</div>
+          </div>
+        </div>
+        <div class="h-3 rounded-full overflow-hidden mb-3" style="background-color: var(--surface-2);">
+          <div class="h-full rounded-full transition-all duration-700" style="width:${pct}%; background-color: ${color.bar};"></div>
+        </div>
+        <div class="flex items-center justify-between text-[11px] text-stone-500 mb-3">
+          <span>${pct.toFixed(0)}% of threshold</span>
+          <span>${esc(fmt(GST_THRESHOLD - rolling, cur))} remaining</span>
+        </div>
+        ${projection ? `<div class="text-xs text-stone-500">${projection}</div>` : ''}
+      `, 'p-6');
+    }
+
+    // BAS preview — shown in place of the threshold card when GST is enabled.
+    // Quarter selection mirrors the active period mode:
+    //   • Quarter mode → the selected quarter
+    //   • Month / FY  → the quarter containing today (= the BAS period currently
+    //     being built up; useful for "where are we so far this quarter?")
+    function basPreviewCard() {
+      const cur = state.data.settings.currency;
+      const rate = Number(state.data.settings.gstRate || 10);
+
+      const qObj = state.period === 'quarter' ? state.currentQuarter : currentQuarter();
+      const range = quarterRange(qObj);
+      const isInQ = (iso) => iso >= range.start && iso <= range.end;
+
+      let grossCollected = 0; // sum of positive income in the quarter
+      for (const i of state.data.income) {
+        const a = parseAmount(i.amount);
+        if (a > 0 && isInQ(i.date)) grossCollected += a;
+      }
+      // Assumption noted in the UI: when registered, all income treated as
+      // GST-inclusive. GST owed = gross × rate / (100 + rate).
+      const gstCollected = grossCollected * rate / (100 + rate);
+
+      let gstClaimable = 0;
+      for (const e of state.data.expenses) {
+        if (!e.gstInclusive) continue;
+        if (!isInQ(e.date)) continue;
+        const a = parseAmount(e.amount);
+        gstClaimable += a * rate / (100 + rate);
+      }
+      const netLiability = gstCollected - gstClaimable;
+      const isRefund = netLiability < 0;
+
+      const today = todayISO();
+      const inProgress = today >= range.start && today <= range.end;
+
+      return card(`
+        <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">BAS preview${inProgress ? ' · in progress' : ''}</div>
+            <h2 class="font-serif text-2xl font-light text-stone-900">${esc(quarterShort(qObj))} ${qObj.fy} (Q${qObj.q})</h2>
+            <div class="text-xs text-stone-500 mt-1">Treats all income as GST-inclusive at ${rate}%. Claimable GST is the GST component of expenses you've marked GST-inclusive.</div>
+          </div>
+          <div class="text-right">
+            <div class="text-[28px] font-medium tabular-nums font-mono leading-none ${isRefund ? '' : 'text-stone-900'}" style="${isRefund ? 'color: var(--income);' : ''}">${isRefund ? '-' : ''}${esc(fmt(Math.abs(netLiability), cur))}</div>
+            <div class="text-xs mt-1" style="color: ${isRefund ? 'var(--income)' : 'var(--text-muted)'};">${isRefund ? 'Net refund expected' : 'Net BAS liability'}</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div class="rounded-2xl p-4" style="background-color: var(--surface-2);">
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">GST collected (1A)</div>
+            <div class="text-lg font-medium tabular-nums font-mono text-stone-900">${esc(fmt(gstCollected, cur))}</div>
+            <div class="text-[11px] text-stone-500 mt-1">${esc(fmt(grossCollected, cur))} gross income × ${rate}/${100+rate}</div>
+          </div>
+          <div class="rounded-2xl p-4" style="background-color: var(--surface-2);">
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">GST claimable (1B)</div>
+            <div class="text-lg font-medium tabular-nums font-mono text-stone-900">${esc(fmt(gstClaimable, cur))}</div>
+            <div class="text-[11px] text-stone-500 mt-1">From GST-inclusive expenses this quarter</div>
+          </div>
+          <div class="rounded-2xl p-4" style="background-color: var(--surface-2);">
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Net (1A − 1B)</div>
+            <div class="text-lg font-medium tabular-nums font-mono ${isRefund ? '' : 'text-stone-900'}" style="${isRefund ? 'color: var(--income);' : ''}">${isRefund ? '-' : ''}${esc(fmt(Math.abs(netLiability), cur))}</div>
+            <div class="text-[11px] text-stone-500 mt-1">${isRefund ? 'ATO owes you' : 'You owe ATO'}</div>
+          </div>
+        </div>
+      `, 'p-6');
+    }
+
     // ============ LedgerTab (Expenses + Income) ============
     function ledgerMeta(kind) {
       const isExpense = kind === 'expense';
@@ -1517,8 +2018,7 @@
       const filter = state[filterKey];
       const sortBy = state[sortKey];
 
-      // Build filter options — in month mode: All + each month seen in data.
-      // In FY mode: All + each FY seen in data.
+      // Filter options match the active period mode (Month | Quarter | FY).
       let filterOptions;
       if (state.period === 'month') {
         const set = new Set(list.map(x => monthKey(x.date)).filter(Boolean));
@@ -1526,6 +2026,14 @@
           const [y, mo] = m.split('-');
           return { value: m, label: `${MONTHS_FULL[Number(mo)-1]} ${y}` };
         })];
+      } else if (state.period === 'quarter') {
+        const seen = new Map();
+        for (const x of list) {
+          const q = quarterFromISO(x.date);
+          if (q) seen.set(q.key, q);
+        }
+        const sorted = [...seen.values()].sort((a, b) => a.fy === b.fy ? b.q - a.q : b.fy - a.fy);
+        filterOptions = [{ value: 'all', label: 'All quarters' }, ...sorted.map(q => ({ value: q.key, label: quarterDisplay(q) }))];
       } else {
         const set = new Set(list.map(x => fyFromISO(x.date)).filter(Boolean));
         filterOptions = [{ value: 'all', label: 'All FY' }, ...[...set].sort((a,b)=>b-a).map(n => ({ value: `FY${n}`, label: `FY${n}` }))];
@@ -1536,6 +2044,9 @@
       if (filter !== 'all') {
         if (state.period === 'month') {
           filtered = filtered.filter(x => monthKey(x.date) === filter);
+        } else if (state.period === 'quarter') {
+          const q = quarterFromKey(filter);
+          if (q) filtered = filtered.filter(x => isoInQuarter(x.date, q));
         } else {
           const fyNum = Number(filter.replace(/^FY/, ''));
           filtered = filtered.filter(x => fyFromISO(x.date) === fyNum);
@@ -1634,6 +2145,8 @@
           </table>
         </div>`;
 
+      const concentration = isExpense ? vendorConcentrationBlock(filtered) : '';
+
       return `
         <div class="space-y-6">
           <div class="flex items-end justify-between flex-wrap gap-4">
@@ -1650,8 +2163,133 @@
           </div>
           ${addForm}
           ${filterRow}
+          ${concentration}
           ${card(table, 'overflow-hidden')}
         </div>`;
+    }
+
+    // ============ Vendor concentration ============
+    // Top 10 vendors by spend within the visible expense rows. Compares
+    // each vendor against the same-length window immediately prior:
+    //   month   → previous month
+    //   quarter → previous quarter
+    //   fy      → previous FY
+    function priorPeriodExpenses(allExpenses) {
+      if (state.period === 'month') {
+        const [y, m] = state.currentMonth.split('-').map(Number);
+        const d = new Date(y, m - 2, 1); // m-2 because Date months are 0-based and we want previous
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        return allExpenses.filter(x => monthKey(x.date) === key);
+      }
+      if (state.period === 'quarter') {
+        const prev = previousQuarter(state.currentQuarter);
+        return allExpenses.filter(x => isoInQuarter(x.date, prev));
+      }
+      const prevFY = state.currentFY - 1;
+      return allExpenses.filter(x => isoInFY(x.date, prevFY));
+    }
+
+    function vendorConcentrationBlock(currentExpenses) {
+      // Only show concentration when there's a meaningful sample to compare.
+      if (!currentExpenses.length) return '';
+      const cur = state.data.settings.currency;
+      const totalCurrent = currentExpenses.reduce((s, e) => s + parseAmount(e.amount), 0);
+      if (totalCurrent <= 0) return '';
+
+      const groupVendor = (rows) => {
+        const m = new Map();
+        for (const e of rows) {
+          const raw = (e.vendor || '').trim();
+          if (!raw) continue;
+          const key = raw.toLowerCase();
+          const cur = m.get(key) || { label: raw, total: 0, count: 0, latestDate: '' };
+          cur.total += parseAmount(e.amount);
+          cur.count += 1;
+          if (!cur.latestDate || (e.date || '') >= cur.latestDate) { cur.label = raw; cur.latestDate = e.date || ''; }
+          m.set(key, cur);
+        }
+        return m;
+      };
+
+      const cur_g = groupVendor(currentExpenses);
+      // Fetch prior-period expense rows (across the *whole* dataset, not the
+      // currently filtered table rows — we need the prior bucket regardless).
+      const prior_g = groupVendor(priorPeriodExpenses(state.data.expenses));
+
+      const rows = [...cur_g.entries()].map(([key, v]) => {
+        const prior = prior_g.get(key);
+        const priorTotal = prior ? prior.total : 0;
+        let mom = null;
+        if (priorTotal > 0) mom = ((v.total - priorTotal) / priorTotal) * 100;
+        else if (priorTotal === 0 && v.total > 0) mom = null; // "new" — handled below
+        return {
+          label: v.label,
+          total: v.total,
+          pct: (v.total / totalCurrent) * 100,
+          mom, // null when prior was 0 (new vendor or no comparison)
+          isNew: !prior,
+          count: v.count,
+        };
+      });
+
+      rows.sort((a, b) => b.total - a.total);
+      const top = rows.slice(0, 10);
+      const maxTotal = top[0]?.total || 1;
+      const periodWord = state.period === 'month' ? 'month' : state.period === 'quarter' ? 'quarter' : 'FY';
+      const compareWord = state.period === 'month' ? 'vs prior month' : state.period === 'quarter' ? 'vs prior quarter' : 'vs prior FY';
+
+      const flagPills = (r) => {
+        const pills = [];
+        if (r.pct > 15) pills.push(`<span class="px-2 py-0.5 rounded-full text-[10px] tracking-[0.05em] uppercase font-medium" style="background-color: var(--danger-bg); color: var(--danger);">Concentration</span>`);
+        if (r.mom !== null && r.mom > 50) pills.push(`<span class="px-2 py-0.5 rounded-full text-[10px] tracking-[0.05em] uppercase font-medium" style="background-color: rgba(217,194,138,0.18); color: var(--warn);">+${r.mom.toFixed(0)}% spike</span>`);
+        return pills.join(' ');
+      };
+
+      const momCell = (r) => {
+        if (r.mom === null) return r.isNew ? `<span class="text-stone-500 text-xs">new</span>` : `<span class="text-stone-500 text-xs">—</span>`;
+        const up = r.mom > 0;
+        const arrow = up ? '↑' : r.mom < 0 ? '↓' : '·';
+        const color = up ? (r.mom > 50 ? 'var(--warn)' : 'var(--text-muted)') : 'var(--income)';
+        return `<span class="tabular-nums font-mono text-xs" style="color: ${color};">${arrow} ${Math.abs(r.mom).toFixed(0)}%</span>`;
+      };
+
+      const body = top.map(r => `
+        <tr style="border-bottom: 1px solid var(--border);">
+          <td class="px-4 md:px-5 py-3 text-stone-900">
+            <div class="truncate max-w-[220px]" title="${attr(r.label)}">${esc(r.label)}</div>
+            <div class="mt-1.5 h-1 rounded-full overflow-hidden" style="background-color: var(--surface-2);">
+              <div class="h-full rounded-full" style="width:${(r.total / maxTotal) * 100}%; background-color: var(--expense);"></div>
+            </div>
+          </td>
+          <td class="px-4 md:px-5 py-3 text-right tabular-nums font-mono">${esc(fmt(r.total, cur))}</td>
+          <td class="px-4 md:px-5 py-3 text-right tabular-nums text-xs text-stone-500">${r.pct.toFixed(1)}%</td>
+          <td class="px-4 md:px-5 py-3 text-right">${momCell(r)}</td>
+          <td class="px-4 md:px-5 py-3 text-right">${flagPills(r)}</td>
+        </tr>`).join('');
+
+      return card(`
+        <div class="px-5 pt-5 flex items-start justify-between flex-wrap gap-3">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Top 10 vendors this ${periodWord}</div>
+            <h2 class="font-serif text-xl font-light text-stone-900">Where the money's going</h2>
+            <div class="text-xs text-stone-500 mt-1">% of ${esc(fmt(totalCurrent, cur))} total · MoM ${esc(compareWord)}</div>
+          </div>
+        </div>
+        <div class="overflow-x-auto mt-3">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid var(--border);">
+                <th class="text-left font-medium px-4 md:px-5 py-3">Vendor</th>
+                <th class="text-right font-medium px-4 md:px-5 py-3 whitespace-nowrap">Total</th>
+                <th class="text-right font-medium px-4 md:px-5 py-3 whitespace-nowrap">% of total</th>
+                <th class="text-right font-medium px-4 md:px-5 py-3 whitespace-nowrap">${esc(compareWord)}</th>
+                <th class="text-right font-medium px-4 md:px-5 py-3 whitespace-nowrap">Flag</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `, 'overflow-hidden');
     }
 
     function ledgerRow(item, M) {
@@ -1709,6 +2347,151 @@
 
     function viewExpenses() { return viewLedger('expense'); }
     function viewIncome()   { return viewLedger('income');  }
+
+    // ============ Customer Summary ============
+    // Lifetime view of who's paid us what. Groups income by source, keyed
+    // case-insensitively (so "Joe@x.com" and "joe@x.com" land in the same
+    // bucket). No status pills, no churn judgement — Dan's December soft
+    // reset means refund rows are operational, not churn signal.
+    function aggregateCustomers(income) {
+      const map = new Map();
+      for (const i of income) {
+        const raw = (i.source || '').trim();
+        if (!raw) continue;
+        const key = raw.toLowerCase();
+        let c = map.get(key);
+        if (!c) {
+          c = {
+            key, label: raw, latestLabelDate: i.date || '',
+            lifetimeGross: 0, refunded: 0, net: 0, count: 0,
+            firstPayment: null, lastPayment: null
+          };
+          map.set(key, c);
+        }
+        // Use the most-recent entry's casing for display.
+        if (!c.latestLabelDate || (i.date || '') >= c.latestLabelDate) {
+          c.label = raw;
+          c.latestLabelDate = i.date || '';
+        }
+        const a = parseAmount(i.amount);
+        if (a >= 0) {
+          c.lifetimeGross += a;
+          c.count += 1;
+          if (!c.firstPayment || i.date < c.firstPayment) c.firstPayment = i.date;
+          if (!c.lastPayment  || i.date > c.lastPayment)  c.lastPayment  = i.date;
+        } else {
+          c.refunded += -a;
+        }
+        c.net = c.lifetimeGross - c.refunded;
+      }
+      return [...map.values()];
+    }
+
+    function viewCustomers() {
+      const { income, settings } = state.data;
+      const cur = settings.currency;
+      const customers = aggregateCustomers(income);
+      const sortBy = state.sortCustomers;
+
+      const arrow = (field) => sortBy.field === field ? (sortBy.dir === 'asc' ? ' ↑' : ' ↓') : '';
+      const compareDate = (s) => s || '0000-00-00';
+      customers.sort((a, b) => {
+        const f = sortBy.field;
+        let av, bv;
+        if (f === 'firstPayment' || f === 'lastPayment') {
+          av = compareDate(a[f]); bv = compareDate(b[f]);
+        } else if (f === 'label') {
+          av = (a.label || '').toLowerCase(); bv = (b.label || '').toLowerCase();
+        } else {
+          av = a[f] ?? 0; bv = b[f] ?? 0;
+        }
+        if (av < bv) return sortBy.dir === 'asc' ? -1 : 1;
+        if (av > bv) return sortBy.dir === 'asc' ? 1 : -1;
+        return 0;
+      });
+
+      const totalGross = customers.reduce((s, c) => s + c.lifetimeGross, 0);
+      const totalRefunded = customers.reduce((s, c) => s + c.refunded, 0);
+      const totalNet = totalGross - totalRefunded;
+
+      const summary = `
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Customers</div>
+            <div class="text-2xl font-medium text-stone-900 tabular-nums font-mono">${customers.length}</div>
+            <div class="text-xs text-stone-500 mt-1">unique sources</div>
+          `, 'p-5')}
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Lifetime gross</div>
+            <div class="text-2xl font-medium text-stone-900 tabular-nums font-mono">${esc(fmt(totalGross, cur))}</div>
+            <div class="text-xs text-stone-500 mt-1">${esc(fmt(totalRefunded, cur))} refunded</div>
+          `, 'p-5')}
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Lifetime net</div>
+            <div class="text-2xl font-medium tabular-nums font-mono" style="color: var(--income);">${esc(fmt(totalNet, cur))}</div>
+            <div class="text-xs text-stone-500 mt-1">${customers.length ? esc(fmt(totalNet / customers.length, cur)) : '—'} avg</div>
+          `, 'p-5')}
+        </div>`;
+
+      const sortHeader = (field, label, align = 'left') => `
+        <th class="text-${align} font-medium px-4 md:px-6 py-4 cursor-pointer hover:text-stone-900 transition-colors whitespace-nowrap"
+            data-action="sort-customers" data-field="${field}">${esc(label)}${arrow(field)}</th>`;
+
+      const rows = customers.map(c => {
+        const refundsCell = c.refunded > 0
+          ? `<span style="color: var(--expense);">${esc(fmt(c.refunded, cur))}</span>`
+          : `<span class="text-stone-500">—</span>`;
+        return `<tr class="hover:bg-stone-50 transition-colors" style="border-bottom: 1px solid var(--border);">
+          <td class="px-4 md:px-6 py-3 text-stone-900">
+            <div class="truncate max-w-[260px]" title="${attr(c.label)}">${esc(c.label)}</div>
+          </td>
+          <td class="px-4 md:px-6 py-3 text-right tabular-nums font-medium font-mono">${esc(fmt(c.lifetimeGross, cur))}</td>
+          <td class="px-4 md:px-6 py-3 text-right tabular-nums font-mono hidden md:table-cell">${refundsCell}</td>
+          <td class="px-4 md:px-6 py-3 text-right tabular-nums font-medium font-mono" style="color: var(--income);">${esc(fmt(c.net, cur))}</td>
+          <td class="px-4 md:px-6 py-3 text-right tabular-nums text-xs text-stone-500 hidden md:table-cell">${c.count}</td>
+          <td class="px-4 md:px-6 py-3 text-stone-600 tabular-nums text-xs font-mono hidden lg:table-cell">${esc(c.firstPayment ? fmtDate(c.firstPayment) : '—')}</td>
+          <td class="px-4 md:px-6 py-3 text-stone-600 tabular-nums text-xs font-mono">${esc(c.lastPayment ? fmtDate(c.lastPayment) : '—')}</td>
+        </tr>`;
+      }).join('');
+
+      const table = customers.length === 0
+        ? `<div class="p-14 text-center text-stone-500 text-sm">No customers yet — log some income first.</div>`
+        : `<div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid var(--border);">
+                ${sortHeader('label', 'Customer')}
+                ${sortHeader('lifetimeGross', 'Lifetime gross', 'right')}
+                <th class="text-right font-medium px-4 md:px-6 py-4 hidden md:table-cell whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="refunded">Refunded${arrow('refunded')}</th>
+                ${sortHeader('net', 'Net', 'right')}
+                <th class="text-right font-medium px-4 md:px-6 py-4 hidden md:table-cell whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="count">Count${arrow('count')}</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 hidden lg:table-cell whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="firstPayment">First${arrow('firstPayment')}</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="lastPayment">Last${arrow('lastPayment')}</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
+
+      return `
+        <div class="space-y-6">
+          <div>
+            <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">Who's paid us what</div>
+            <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">Customers</h1>
+            <p class="text-sm text-stone-500 mt-2">Income rolled up by source. Lifetime grain — not affected by the period selector. Click any column header to sort.</p>
+          </div>
+          ${summary}
+          ${card(table, 'overflow-hidden')}
+        </div>`;
+    }
+
+    function actSortCustomers(field) {
+      const cur = state.sortCustomers;
+      state.sortCustomers = cur.field === field
+        ? { field, dir: cur.dir === 'asc' ? 'desc' : 'asc' }
+        : { field, dir: field === 'label' ? 'asc' : 'desc' };
+      render();
+    }
 
     // ============ Ledger action handlers ============
     function actAddEntry(kind) {
@@ -2083,13 +2866,16 @@
       const { expenses, income, settings } = state.data;
       const { currency, partnerA, partnerB, splitA, splitB, gstEnabled, gstRate } = settings;
 
-      // FY selection: Tax tab always uses the FY picker.
-      // If user arrived from month mode, default to the FY that contains state.currentMonth.
-      const fyForMonth = (() => {
+      // Tax/EOFY is inherently FY-grain. Derive a target FY from whichever
+      // period is active so we don't surprise the user — FY mode uses the
+      // selected FY, Quarter uses the quarter's FY, Month uses the FY that
+      // contains currentMonth.
+      const targetFY = (() => {
+        if (state.period === 'fy') return state.currentFY;
+        if (state.period === 'quarter') return state.currentQuarter.fy;
         const [y, m] = (state.currentMonth || '').split('-').map(Number);
         return m >= 7 ? y + 1 : y;
       })();
-      const targetFY = state.period === 'fy' ? state.currentFY : fyForMonth;
 
       const fyIncome = income.filter(i => isoInFY(i.date, targetFY));
       const fyExpenses = expenses.filter(e => isoInFY(e.date, targetFY));
@@ -2342,9 +3128,10 @@
       return t;
     }
 
-    // Resolve the FY in play for Tax-tab operations (FY picker or derived from month)
+    // Resolve the FY in play for Tax-tab operations regardless of period mode.
     function taxActiveFY() {
       if (state.period === 'fy') return state.currentFY;
+      if (state.period === 'quarter') return state.currentQuarter.fy;
       const [y, m] = (state.currentMonth || '').split('-').map(Number);
       return m >= 7 ? y + 1 : y;
     }
@@ -3250,6 +4037,7 @@
       overview: viewOverview,
       expenses: viewExpenses,
       income: viewIncome,
+      customers: viewCustomers,
       uncollected: viewUncollected,
       loans: viewLoans,
       tax: viewTax,
@@ -3309,9 +4097,13 @@
         return render();
       }
 
-      // Period mode toggle
+      // Period mode toggle. Filters keyed by the previous mode would silently
+      // evaluate to no matches in the new mode, so reset both ledger filters
+      // back to "all" whenever the mode changes.
       if (action === 'set-period-mode') {
         state.period = el.dataset.mode;
+        state.filterExpense = 'all';
+        state.filterIncome  = 'all';
         closeAllDropdowns();
         return render();
       }
@@ -3361,6 +4153,11 @@
       // Period picker selections (fired via dd-select forwarding)
       if (action === 'pick-month') { state.currentMonth = el.dataset.value; return render(); }
       if (action === 'pick-fy')    { state.currentFY = Number(el.dataset.value); return render(); }
+      if (action === 'pick-quarter') {
+        const q = quarterFromKey(el.dataset.value);
+        if (q) state.currentQuarter = q;
+        return render();
+      }
 
       // Number field +/– step
       if (action === 'num-step') {
@@ -3415,6 +4212,9 @@
       // Loans
       if (action === 'add-loan') return actAddLoan();
       if (action === 'delete-loan') return actDeleteLoan(el.dataset.id);
+
+      // Customers
+      if (action === 'sort-customers') return actSortCustomers(el.dataset.field);
 
       // Tax
       if (action === 'tax-csv-export') return actTaxCsvExport();
