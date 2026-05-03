@@ -6,6 +6,12 @@
   <meta name="theme-color" content="#16181a" />
   <meta name="color-scheme" content="dark" />
   <title>Ventra Ledger</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="apple-touch-icon" href="./icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Ledger" />
 
   <!-- Tailwind Play CDN (JIT, supports arbitrary values) -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -129,6 +135,10 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spin { display: inline-block; animation: spin 900ms linear infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.45; }
+    }
 
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -512,6 +522,9 @@
       next.dataModifiedAt = new Date().toISOString();
       state.data = next;
       scheduleSave();
+      // Schedule a sync push 3s after the last change. Fully independent of
+      // the local 600ms debounce — local saves never wait on the network.
+      if (typeof schedulePush === 'function') schedulePush();
       render();
     }
 
@@ -526,13 +539,21 @@
       }, 600);
     }
 
-    // Flush any pending save synchronously (for beforeunload in future sync stage)
+    // Flush any pending save synchronously, plus best-effort sync flush via
+    // keepalive fetch (sendBeacon can't set Authorization headers).
     function flushSave() {
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
       saveData(state.data);
       state.saving = false;
+      if (typeof sync !== 'undefined' && sync.pushTimer) {
+        clearTimeout(sync.pushTimer);
+        sync.pushTimer = null;
+        // Fire-and-forget; keepalive lets it survive the navigation.
+        try { syncPush({ keepalive: true }); } catch {}
+      }
     }
     window.addEventListener('beforeunload', flushSave);
+    window.addEventListener('pagehide', flushSave);
 
     // Patch the sidebar save indicator in place (avoids re-render flashing)
     function paintSaveIndicator() {
@@ -542,6 +563,423 @@
       document.querySelectorAll('[data-save-label]').forEach(el => {
         el.textContent = state.saving ? 'Saving…' : 'All changes saved';
       });
+    }
+
+    // ============ Sync (encrypted shared Gist) ============
+    // Crypto: AES-GCM 256, key from PBKDF2-SHA256 (100k iters), 16-byte salt per
+    // gist + 12-byte IV per write. Passphrase never persisted; derived key cached
+    // as JWK in sessionStorage so reload doesn't re-prompt mid-session.
+    //
+    // Wire format in the gist's `ledger.enc` file:
+    //   { v, salt: <b64>, iv: <b64>, ciphertext: <b64>,
+    //     lastModified: <ISO>, lastEditedBy: <userName> }
+    //
+    // The token (and the optional gist ID) live in localStorage and are
+    // per-device — they are NEVER part of state.data, never synced.
+
+    const SYNC_TOKEN_KEY  = 'ventra-ledger-sync-token';
+    const SYNC_GIST_KEY   = 'ventra-ledger-sync-gist';
+    const SYNC_KEY_CACHE  = 'ventra-ledger-sync-keyjwk';   // sessionStorage
+    const SYNC_SALT_CACHE = 'ventra-ledger-sync-salt';     // sessionStorage
+    const GIST_FILENAME   = 'ledger.enc';
+    const SYNC_VERSION    = 1;
+    const SYNC_DEBOUNCE_MS = 3000;
+
+    // Runtime sync state. status drives the indicator.
+    //   unconfigured: no token saved
+    //   idle:         configured + last sync OK
+    //   pulling/pushing: in flight
+    //   offline:      navigator.onLine === false
+    //   need-passphrase: have token + gist, but key isn't derived yet
+    //   error:        last operation errored
+    const sync = {
+      status: 'unconfigured',
+      error: null,
+      lastSyncedAt: null,
+      lastEditedBy: null,
+      cryptoKey: null,
+      pushTimer: null,
+      retryTimer: null,
+      pendingConflict: null,
+    };
+
+    class SyncError extends Error {
+      constructor(code, message) { super(message); this.code = code; }
+    }
+
+    const _b64enc = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+    const _b64dec = (s) => {
+      const bin = atob(s);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    };
+
+    function syncToken()  { return localStorage.getItem(SYNC_TOKEN_KEY) || ''; }
+    function syncGistId() { return localStorage.getItem(SYNC_GIST_KEY) || ''; }
+    function setSyncToken(v) { v ? localStorage.setItem(SYNC_TOKEN_KEY, v) : localStorage.removeItem(SYNC_TOKEN_KEY); }
+    function setSyncGistId(v) { v ? localStorage.setItem(SYNC_GIST_KEY, v) : localStorage.removeItem(SYNC_GIST_KEY); }
+    function clearSyncKeyCache() {
+      sessionStorage.removeItem(SYNC_KEY_CACHE);
+      sessionStorage.removeItem(SYNC_SALT_CACHE);
+      sync.cryptoKey = null;
+    }
+    function isSyncConfigured() { return !!syncToken(); }
+
+    async function deriveKey(passphrase, saltBytes) {
+      const baseKey = await crypto.subtle.importKey(
+        'raw', new TextEncoder().encode(passphrase),
+        'PBKDF2', false, ['deriveKey']
+      );
+      return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: saltBytes, iterations: 100_000, hash: 'SHA-256' },
+        baseKey,
+        { name: 'AES-GCM', length: 256 },
+        true,
+        ['encrypt', 'decrypt']
+      );
+    }
+
+    // Resolve a CryptoKey for a given salt. If the in-memory key OR the session
+    // cache matches the salt, returns it without prompting. If a passphrase is
+    // supplied, always re-derives and replaces the cache.
+    async function resolveKey({ passphrase, salt }) {
+      const saltB64 = _b64enc(salt);
+      if (passphrase) {
+        const key = await deriveKey(passphrase, salt);
+        sync.cryptoKey = key;
+        const jwk = await crypto.subtle.exportKey('jwk', key);
+        sessionStorage.setItem(SYNC_KEY_CACHE, JSON.stringify(jwk));
+        sessionStorage.setItem(SYNC_SALT_CACHE, saltB64);
+        return key;
+      }
+      const cachedSalt = sessionStorage.getItem(SYNC_SALT_CACHE);
+      if (sync.cryptoKey && cachedSalt === saltB64) return sync.cryptoKey;
+      const cachedJwk = sessionStorage.getItem(SYNC_KEY_CACHE);
+      if (cachedJwk && cachedSalt === saltB64) {
+        const key = await crypto.subtle.importKey(
+          'jwk', JSON.parse(cachedJwk),
+          { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']
+        );
+        sync.cryptoKey = key;
+        return key;
+      }
+      return null;
+    }
+
+    async function encryptJSON(obj, key) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ct = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv }, key,
+        new TextEncoder().encode(JSON.stringify(obj))
+      );
+      return { iv: _b64enc(iv), ciphertext: _b64enc(ct) };
+    }
+
+    async function decryptJSON(ivB64, ctB64, key) {
+      const pt = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: _b64dec(ivB64) }, key, _b64dec(ctB64)
+      );
+      try { return JSON.parse(new TextDecoder().decode(pt)); }
+      catch { throw new SyncError('format', 'Decrypted blob is not valid JSON'); }
+    }
+
+    // GitHub API helpers ----------------------------------------------------
+
+    async function ghFetch(path, opts = {}) {
+      const token = syncToken();
+      if (!token) throw new SyncError('unconfigured', 'No GitHub token configured');
+      return fetch(`https://api.github.com${path}`, {
+        ...opts,
+        headers: {
+          'Accept': 'application/vnd.github+json',
+          'Authorization': `Bearer ${token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+          ...(opts.headers || {})
+        }
+      });
+    }
+
+    async function syncTestConnection() {
+      const r = await ghFetch('/user');
+      if (r.status === 401) throw new SyncError('auth', 'Token rejected');
+      if (!r.ok) throw new SyncError('http', `GitHub returned ${r.status}`);
+      const scopes = (r.headers.get('X-OAuth-Scopes') || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      const user = await r.json();
+      return { login: user.login, scopes };
+    }
+
+    async function syncPullRaw(gistId) {
+      const r = await ghFetch(`/gists/${gistId}`);
+      if (r.status === 404) throw new SyncError('not_found', 'Gist not found');
+      if (r.status === 401) throw new SyncError('auth', 'Token rejected');
+      if (!r.ok) throw new SyncError('http', `GitHub returned ${r.status}`);
+      const data = await r.json();
+      const file = data.files && data.files[GIST_FILENAME];
+      if (!file) throw new SyncError('empty', 'Gist has no ledger.enc yet');
+      const content = file.truncated
+        ? await (await fetch(file.raw_url)).text()
+        : file.content;
+      try { return JSON.parse(content); }
+      catch { throw new SyncError('format', 'Cloud blob is not valid JSON'); }
+    }
+
+    async function syncCreateGist(blobJson) {
+      const body = {
+        description: 'Ventra Ledger encrypted blob',
+        public: false,
+        files: { [GIST_FILENAME]: { content: blobJson } }
+      };
+      const r = await ghFetch('/gists', { method: 'POST', body: JSON.stringify(body) });
+      if (!r.ok) throw new SyncError('http', `Create gist failed: ${r.status}`);
+      return (await r.json()).id;
+    }
+
+    async function syncPatchGist(gistId, blobJson, { keepalive = false } = {}) {
+      const body = { files: { [GIST_FILENAME]: { content: blobJson } } };
+      const r = await ghFetch(`/gists/${gistId}`, {
+        method: 'PATCH', body: JSON.stringify(body), keepalive
+      });
+      if (!r.ok && !keepalive) {
+        // keepalive responses can come back as 0 status — don't throw on flush
+        throw new SyncError('http', `Patch gist failed: ${r.status}`);
+      }
+    }
+
+    // Orchestration ---------------------------------------------------------
+
+    function setSyncStatus(status, message = null) {
+      sync.status = status;
+      sync.error = (status === 'error' || status === 'offline' || status === 'need-passphrase') ? message : null;
+      paintSyncIndicator();
+    }
+
+    function handleSyncError(err) {
+      // Crypto failures throw DOMException with name === 'OperationError'.
+      if (err && (err.name === 'OperationError' || err.code === 'OperationError')) {
+        setSyncStatus('error', "Decryption failed — passphrase doesn't match the cloud copy.");
+        clearSyncKeyCache();
+        return;
+      }
+      if (err instanceof SyncError) {
+        if (err.code === 'auth') return setSyncStatus('error', 'GitHub rejected the token. Generate a new one with the gist scope.');
+        if (err.code === 'not_found') return setSyncStatus('error', 'Gist ID not found. Check the ID, or leave blank to create one on the next sync.');
+        if (err.code === 'empty')     return setSyncStatus('idle');
+        if (err.code === 'unconfigured') return setSyncStatus('unconfigured');
+        return setSyncStatus('error', err.message || 'Sync error');
+      }
+      if (!navigator.onLine) return setSyncStatus('offline', 'You are offline. Will retry when reconnected.');
+      const msg = (err && err.message) ? err.message : String(err);
+      if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
+        return setSyncStatus('offline', 'Network error. Will retry when reconnected.');
+      }
+      setSyncStatus('error', msg);
+    }
+
+    function buildBlob() {
+      // 16-byte salt: stable per-gist. Reuse cached salt if we have one, else
+      // mint a new one (first push from device A).
+      let saltB64 = sessionStorage.getItem(SYNC_SALT_CACHE);
+      if (!saltB64) {
+        const s = crypto.getRandomValues(new Uint8Array(16));
+        saltB64 = _b64enc(s);
+        sessionStorage.setItem(SYNC_SALT_CACHE, saltB64);
+      }
+      return {
+        v: SYNC_VERSION,
+        salt: saltB64,
+        lastModified: state.data.dataModifiedAt || new Date().toISOString(),
+        lastEditedBy: state.userName || ''
+      };
+    }
+
+    async function syncPush({ keepalive = false } = {}) {
+      if (!isSyncConfigured()) return;
+      if (!sync.cryptoKey) {
+        // Need passphrase before we can push. Don't auto-prompt — surface state.
+        if (!sync.pendingConflict) setSyncStatus('need-passphrase', 'Enter your passphrase in Settings → Sync to push.');
+        return;
+      }
+      if (!navigator.onLine) {
+        setSyncStatus('offline', 'Offline. Will retry when reconnected.');
+        return;
+      }
+      setSyncStatus('pushing');
+      try {
+        const meta = buildBlob();
+        const { iv, ciphertext } = await encryptJSON(state.data, sync.cryptoKey);
+        const blobJson = JSON.stringify({ ...meta, iv, ciphertext });
+        let gistId = syncGistId();
+        if (!gistId) {
+          gistId = await syncCreateGist(blobJson);
+          setSyncGistId(gistId);
+        } else {
+          await syncPatchGist(gistId, blobJson, { keepalive });
+        }
+        sync.lastSyncedAt = new Date().toISOString();
+        sync.lastEditedBy = meta.lastEditedBy;
+        setSyncStatus('idle');
+      } catch (err) {
+        handleSyncError(err);
+      }
+    }
+
+    // Pulls and decrypts. Returns { remote, lastModified, lastEditedBy } or null
+    // if anything prevented decryption (passphrase missing, error, etc).
+    async function syncPull() {
+      if (!isSyncConfigured()) return null;
+      const gistId = syncGistId();
+      if (!gistId) return null;
+      if (!navigator.onLine) {
+        setSyncStatus('offline', 'Offline. Will retry when reconnected.');
+        return null;
+      }
+      setSyncStatus('pulling');
+      try {
+        const blob = await syncPullRaw(gistId);
+        const saltBytes = _b64dec(blob.salt);
+        sessionStorage.setItem(SYNC_SALT_CACHE, blob.salt);   // align cache to gist's salt
+        const key = await resolveKey({ salt: saltBytes });
+        if (!key) {
+          setSyncStatus('need-passphrase', 'Passphrase needed to decrypt cloud ledger.');
+          return null;
+        }
+        const remote = await decryptJSON(blob.iv, blob.ciphertext, key);
+        sync.lastSyncedAt = new Date().toISOString();
+        sync.lastEditedBy = blob.lastEditedBy;
+        setSyncStatus('idle');
+        return { remote, lastModified: blob.lastModified, lastEditedBy: blob.lastEditedBy };
+      } catch (err) {
+        handleSyncError(err);
+        return null;
+      }
+    }
+
+    function schedulePush() {
+      if (!isSyncConfigured()) return;
+      if (sync.pushTimer) clearTimeout(sync.pushTimer);
+      sync.pushTimer = setTimeout(() => {
+        sync.pushTimer = null;
+        syncPush();
+      }, SYNC_DEBOUNCE_MS);
+    }
+
+    // Pull on load + conflict resolution.
+    async function syncOnLoad() {
+      if (!isSyncConfigured()) {
+        setSyncStatus('unconfigured');
+        return;
+      }
+      if (!syncGistId()) {
+        setSyncStatus('idle');     // first device, nothing to pull
+        return;
+      }
+      const result = await syncPull();
+      if (!result) return;          // status already set
+      const { remote, lastModified, lastEditedBy } = result;
+      const localMod = state.data.dataModifiedAt || '1970-01-01T00:00:00.000Z';
+      if (lastModified > localMod) {
+        // Cloud strictly newer — surface conflict modal, don't overwrite
+        sync.pendingConflict = { remote, lastModified, lastEditedBy };
+        showConflictModal();
+      } else if (lastModified < localMod) {
+        // Local strictly newer — push
+        schedulePush();
+      }
+      // equal → nothing to do
+    }
+
+    // Online/offline listeners ----------------------------------------------
+    window.addEventListener('online', () => {
+      if (sync.retryTimer) { clearTimeout(sync.retryTimer); sync.retryTimer = null; }
+      if (isSyncConfigured() && sync.cryptoKey) syncPush();
+    });
+    window.addEventListener('offline', () => {
+      if (isSyncConfigured()) setSyncStatus('offline', 'You are offline. Will retry when reconnected.');
+    });
+
+    // Indicator paint — sidebar pill + mobile-tab dot.
+    function paintSyncIndicator() {
+      const status = sync.status;
+      const palette = {
+        idle:            { bg: 'var(--income-bg)',  fg: 'var(--income)',     dot: 'var(--income)' },
+        pushing:         { bg: 'var(--accent-glow)', fg: 'var(--accent)',    dot: 'var(--accent)', pulse: true },
+        pulling:         { bg: 'var(--accent-glow)', fg: 'var(--accent)',    dot: 'var(--accent)', pulse: true },
+        offline:         { bg: 'rgba(217,194,138,0.12)', fg: 'var(--warn)',  dot: 'var(--warn)' },
+        error:           { bg: 'var(--danger-bg)', fg: 'var(--danger)',      dot: 'var(--danger)' },
+        'need-passphrase': { bg: 'var(--danger-bg)', fg: 'var(--danger)',    dot: 'var(--danger)' },
+        unconfigured:    null
+      }[status] || null;
+      const labels = {
+        idle:            sync.lastSyncedAt ? `Synced · ${relTime(sync.lastSyncedAt)}` : 'Synced',
+        pushing:         'Syncing…',
+        pulling:         'Syncing…',
+        offline:         'Offline · will retry',
+        error:           'Sync failed',
+        'need-passphrase': 'Passphrase needed',
+        unconfigured:    ''
+      };
+      const label = labels[status] || '';
+      document.querySelectorAll('[data-sync-pill]').forEach(el => {
+        if (!palette) { el.style.display = 'none'; return; }
+        el.style.display = '';
+        el.setAttribute('data-status', status);
+        el.style.color = palette.fg;
+        el.style.backgroundColor = palette.bg;
+        const dot = el.querySelector('[data-sync-dot]');
+        if (dot) {
+          dot.style.backgroundColor = palette.dot;
+          dot.style.animation = palette.pulse ? 'pulse 1.4s ease infinite' : '';
+        }
+        const lbl = el.querySelector('[data-sync-label]');
+        if (lbl) lbl.textContent = label;
+      });
+      // Mobile: dot on the Settings tab when status is non-idle/unconfigured.
+      document.querySelectorAll('[data-mobile-sync-dot]').forEach(el => {
+        const show = palette && status !== 'idle';
+        el.style.display = show ? '' : 'none';
+        if (show) el.style.backgroundColor = palette.dot;
+      });
+    }
+
+    // ----- Conflict modal -----
+    function showConflictModal() {
+      const c = sync.pendingConflict;
+      if (!c) return;
+      const editor = c.lastEditedBy || 'someone';
+      const when = c.lastModified ? new Date(c.lastModified).toLocaleString('en-AU') : '';
+      const overlay = document.createElement('div');
+      overlay.dataset.modal = 'sync-conflict';
+      overlay.style.cssText = `
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
+        display: flex; align-items: center; justify-content: center;
+        padding: 16px;
+      `;
+      overlay.innerHTML = `
+        <div style="
+          background: var(--surface-raised); color: var(--text);
+          max-width: 460px; padding: 28px; border-radius: 18px;
+          box-shadow: var(--shadow-pop);
+          font: 400 14px/1.5 'DM Sans', system-ui, sans-serif;
+        ">
+          <div style="font-family: 'Fraunces', serif; font-size: 22px; font-weight: 300; margin-bottom: 10px;">Cloud has newer changes</div>
+          <p style="color: var(--text-muted); margin-bottom: 14px;">
+            The cloud copy was last edited by <strong style="color: var(--text);">${esc(editor)}</strong>${when ? ` at <strong style="color: var(--text);">${esc(when)}</strong>` : ''}, after your local copy was last modified.
+          </p>
+          <p style="color: var(--text-muted); margin-bottom: 22px;">Load the cloud version, or keep your local changes (which will overwrite the cloud on the next push)?</p>
+          <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button data-action="conflict-keep-local"
+              style="padding: 10px 16px; border-radius: 12px; background: var(--surface); color: var(--text); font-weight: 500; box-shadow: ${'var(--shadow-field)'};">Keep local</button>
+            <button data-action="conflict-load-cloud"
+              style="padding: 10px 16px; border-radius: 12px; background: var(--accent); color: var(--bg); font-weight: 500; box-shadow: 0 1px 2px rgba(200,184,239,0.25);">Load cloud</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+    }
+    function dismissConflictModal() {
+      document.querySelectorAll('[data-modal="sync-conflict"]').forEach(el => el.remove());
     }
 
     // ============ Icons (lucide paths) ============
@@ -724,7 +1162,7 @@
         </button>`;
       }).join('');
       return `<aside class="hidden md:flex fixed top-0 left-0 h-screen w-[220px] flex-col p-4 z-20 no-print" style="background-color:var(--sidebar);">
-        <div class="flex items-center gap-2.5 px-2 pt-2 pb-6">
+        <div class="flex items-center gap-2.5 px-2 pt-2 pb-4">
           <div class="w-9 h-9 rounded-xl flex items-center justify-center" style="background-color: var(--surface-raised); box-shadow: inset 0 0 0 1px rgba(200,184,239,0.25);">
             <span class="font-serif text-lg italic leading-none" style="color: var(--accent);">V</span>
           </div>
@@ -733,12 +1171,24 @@
             <div class="text-[10px] tracking-[0.1em] text-stone-500 uppercase">Ledger</div>
           </div>
         </div>
+        <button data-action="install-pwa" data-install-btn
+          class="w-full flex items-center justify-center gap-2 px-3 py-2 mb-4 rounded-2xl text-xs font-medium transition-colors"
+          style="display:none; background: var(--accent-glow); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(200,184,239,0.35);"
+          title="Install Ventra Ledger">
+          ${icon('download', 13)}<span>Install app</span>
+        </button>
         <nav class="flex-1 space-y-1">${nav}</nav>
         <div class="pt-4 border-t" style="border-color:var(--border-strong);">
           <div class="flex items-center gap-2 px-3 py-2 text-xs text-stone-500">
             <div data-save-dot class="w-1.5 h-1.5 rounded-full ${state.saving ? 'bg-amber-500' : 'bg-emerald-600'}"></div>
             <span data-save-label>${state.saving ? 'Saving…' : 'All changes saved'}</span>
           </div>
+          <button type="button" data-action="open-sync-settings" data-sync-pill
+            class="w-full text-left flex items-center gap-2 px-3 py-1.5 mt-0.5 rounded-xl text-[11px] font-medium tracking-[0.02em] transition-colors hover:opacity-90"
+            style="display: none;" title="Sync status — click to open Sync settings">
+            <span data-sync-dot class="w-1.5 h-1.5 rounded-full"></span>
+            <span data-sync-label></span>
+          </button>
           <div class="px-3 py-1.5 text-[11px] text-stone-400 tracking-[0.05em]">
             ${esc(state.data.settings.partnerA)} &amp; ${esc(state.data.settings.partnerB)}
           </div>
@@ -752,9 +1202,11 @@
         const active = state.tab === id;
         const gstDot = (id === 'tax' && state.data.settings.gstEnabled)
           ? `<span class="absolute top-1 right-3 w-1.5 h-1.5 rounded-full" style="background-color:var(--income);"></span>` : '';
+        const syncDot = (id === 'settings')
+          ? `<span data-mobile-sync-dot class="absolute top-1 right-3 w-1.5 h-1.5 rounded-full" style="display:none;"></span>` : '';
         return `<button data-action="tab" data-tab="${t.id}"
           class="relative flex-1 flex flex-col items-center justify-center gap-1 py-2 text-[10px] tracking-[0.05em] font-medium transition-colors ${active ? 'text-stone-900' : 'text-stone-500'}">
-          ${gstDot}${icon(t.icon, 18)}<span>${esc(t.label)}</span>
+          ${gstDot}${syncDot}${icon(t.icon, 18)}<span>${esc(t.label)}</span>
         </button>`;
       }).join('');
       return `<nav class="md:hidden fixed bottom-0 left-0 right-0 z-30 flex pb-safe no-print"
@@ -2432,6 +2884,105 @@
         </div>
       `, 'p-6');
 
+      // ----- Install card (PWA) -----
+      const installCard = (() => {
+        const standalone = pwa.isStandalone;
+        const installable = !!pwa.deferredPrompt && !standalone;
+        const isIOS = pwa.isIOS && !standalone;
+        if (standalone) {
+          return card(`
+            <div class="flex items-center gap-3">
+              <div class="w-9 h-9 rounded-xl flex items-center justify-center" style="background: var(--accent-glow); color: var(--accent);">${icon('check', 18)}</div>
+              <div>
+                <div class="text-sm font-medium text-stone-900">Installed</div>
+                <div class="text-xs text-stone-500">Running as a standalone app on this device.</div>
+              </div>
+            </div>
+          `, 'p-5');
+        }
+        if (installable) {
+          return card(`
+            <div class="flex items-start justify-between gap-4 flex-wrap">
+              <div>
+                <h2 class="text-sm font-medium text-stone-900 mb-1">Install Ventra Ledger</h2>
+                <p class="text-xs text-stone-500">Adds an icon to your dock / home screen and opens in its own window. Works offline.</p>
+              </div>
+              ${button({ children: `${icon('download', 14)} Install`, variant: 'accent', action: 'install-pwa' })}
+            </div>
+          `, 'p-5');
+        }
+        if (isIOS) {
+          return card(`
+            <h2 class="text-sm font-medium text-stone-900 mb-1">Install on iOS</h2>
+            <p class="text-xs text-stone-500 leading-relaxed">
+              Tap the <strong class="text-stone-800">Share</strong> button in Safari, then choose
+              <strong class="text-stone-800">Add to Home Screen</strong>. The app will open in its own
+              window with offline support.
+            </p>
+          `, 'p-5');
+        }
+        return '';
+      })();
+
+      // Sync status visuals for the Settings card
+      const syncStatusLabel = ({
+        idle: sync.lastSyncedAt ? `Synced · ${relTime(sync.lastSyncedAt)}` : 'Synced',
+        pulling: 'Pulling cloud copy…',
+        pushing: 'Pushing to cloud…',
+        offline: 'Offline · will retry when reconnected',
+        'need-passphrase': 'Passphrase needed',
+        error: 'Sync failed',
+        unconfigured: 'Not connected'
+      })[sync.status] || sync.status;
+      const lastEditedLine = (sync.status === 'idle' && sync.lastEditedBy)
+        ? `<div class="text-xs text-stone-500 mt-1">Last edit by <strong class="text-stone-800">${esc(sync.lastEditedBy)}</strong></div>` : '';
+
+      const syncCard = card(`
+        <div class="flex items-start justify-between gap-3 mb-4">
+          <h2 class="text-sm font-medium text-stone-900">Shared sync</h2>
+          <div class="text-[10px] tracking-[0.1em] uppercase" style="color: ${sync.status === 'idle' ? 'var(--income)' : sync.status === 'unconfigured' ? 'var(--text-muted)' : 'var(--accent)'};">${esc(syncStatusLabel)}</div>
+        </div>
+
+        <div class="rounded-2xl p-4 mb-4 text-xs leading-relaxed" style="background: var(--accent-glow); color: var(--text); border: 1px solid rgba(200,184,239,0.2);">
+          <strong>This ledger is shared with your business partner.</strong>
+          Use the same Gist ID + passphrase on both devices. Each person should generate their <em>own</em> GitHub token.
+          ${state.userName ? `Signed in on this device as <strong>${esc(state.userName)}</strong>.` : 'Set your name in the section below so your edits are stamped.'}
+        </div>
+
+        <div class="rounded-2xl p-4 mb-4 text-xs" style="background: var(--danger-bg); color: var(--text); border: 1px solid rgba(216,144,134,0.2);">
+          ⚠ The token is stored in this device's localStorage in plaintext. Anyone with access to your browser profile can read it. Use a token scoped to <strong>gist</strong> only.
+        </div>
+
+        <form data-sync-form class="grid grid-cols-1 gap-3" onsubmit="return false;">
+          <div>
+            ${label('GitHub personal access token (gist scope)')}
+            ${textField({ type: 'password', value: syncToken(), field: 'syncToken', placeholder: 'ghp_… or github_pat_…' })}
+          </div>
+          <div>
+            ${label('Encryption passphrase')}
+            ${textField({ type: 'password', value: '', field: 'syncPassphrase', placeholder: sync.cryptoKey ? '✓ stored in this session' : 'Set a strong passphrase — same on both devices' })}
+          </div>
+          <div>
+            ${label('Gist ID (leave blank on first device)')}
+            ${textField({ value: syncGistId(), field: 'syncGistId', placeholder: 'optional — paste from primary device' })}
+          </div>
+        </form>
+
+        ${sync.status === 'error' && sync.error ? `<div class="mt-3 text-xs" style="color: var(--danger);">⚠ ${esc(sync.error)}</div>` : ''}
+        ${sync.status === 'need-passphrase' && sync.error ? `<div class="mt-3 text-xs" style="color: var(--accent);">${esc(sync.error)}</div>` : ''}
+        ${lastEditedLine}
+
+        <div class="mt-5 flex flex-wrap items-center gap-2">
+          ${button({ children: 'Save & sync now', variant: 'accent', action: 'sync-save-and-push' })}
+          ${button({ children: 'Test connection', variant: 'secondary', size: 'sm', action: 'sync-test' })}
+          ${syncToken() ? button({ children: 'Disconnect', variant: 'danger', size: 'sm', action: 'sync-disconnect' }) : ''}
+        </div>
+
+        <div class="mt-4 text-[11px] text-stone-500">
+          Your name is stored per-device in <code class="px-1 py-0.5 rounded">ventra-ledger-user</code> and is <strong>not synced</strong>. Each partner sets their own name on their own device.
+        </div>
+      `, 'p-6');
+
       const userCard = card(`
         <h2 class="text-sm font-medium text-stone-900 mb-1">Your name on this device</h2>
         <p class="text-sm text-stone-500 mb-4">
@@ -2455,11 +3006,14 @@
           For the accountant at EOFY, use <strong class="text-stone-800">Tax → Generate EOFY Pack</strong> —
           it produces one ZIP with CSVs and PDFs scoped to a single financial year.
         </p>
-        <p class="text-sm text-stone-500 mb-4">
+        <p class="text-sm text-stone-500 mb-2">
           If something is broken, or you need a raw full-data dump across every FY, use
           <strong class="text-stone-800">Export JSON</strong> below. It reads straight from
           <code class="px-1 py-0.5 rounded">localStorage</code> and works even if cloud sync is
           broken or mis-configured.
+        </p>
+        <p class="text-sm mb-4" style="color: var(--income);">
+          Plaintext export always works. You never need the passphrase to recover your data from this device.
         </p>
         <div class="flex flex-wrap gap-2">
           ${button({ children: `${icon('download', 14)} Export JSON (escape hatch)`, variant: 'secondary', action: 'export-json-raw' })}
@@ -2480,7 +3034,9 @@
             <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">Configuration</div>
             <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">Settings</h1>
           </div>
+          ${installCard || ''}
           ${partnersCard}
+          ${syncCard}
           ${gstCard}
           ${userCard}
           ${dataRecoveryCard}
@@ -2561,6 +3117,135 @@
       setData(d => migrate({ ...defaultData, settings: d.settings }));
     }
 
+    // ----- Sync actions -----
+
+    async function actSyncSaveAndPush() {
+      const form = document.querySelector('[data-sync-form]');
+      if (!form) return;
+      const tokenIn  = (readField(form, 'syncToken') || '').trim();
+      const passIn   = (readField(form, 'syncPassphrase') || '');
+      const gistIdIn = (readField(form, 'syncGistId') || '').trim();
+
+      if (!tokenIn) {
+        showToast('A GitHub token is required.', 'error');
+        return;
+      }
+
+      // Persist token + gist ID changes immediately
+      setSyncToken(tokenIn);
+      setSyncGistId(gistIdIn);
+
+      try {
+        // If user supplied a passphrase, derive a fresh key. We need a salt;
+        // if a gist ID exists, fetch its salt first; otherwise mint one.
+        if (passIn) {
+          let saltBytes;
+          if (gistIdIn) {
+            try {
+              const blob = await syncPullRaw(gistIdIn);
+              saltBytes = _b64dec(blob.salt);
+            } catch (err) {
+              if (err && err.code === 'empty') {
+                saltBytes = crypto.getRandomValues(new Uint8Array(16));
+              } else { handleSyncError(err); render(); return; }
+            }
+          } else {
+            saltBytes = crypto.getRandomValues(new Uint8Array(16));
+          }
+          await resolveKey({ passphrase: passIn, salt: saltBytes });
+        }
+
+        // If we have a gist ID + key, prefer pulling & checking for newer cloud
+        if (syncGistId() && sync.cryptoKey) {
+          const result = await syncPull();
+          // If pull errored (e.g. decryption failure), abort — don't push and
+          // overwrite cloud with local junk. Status is already set.
+          if (sync.status === 'error') { render(); return; }
+          if (result) {
+            const localMod = state.data.dataModifiedAt || '1970-01-01T00:00:00.000Z';
+            if (result.lastModified > localMod) {
+              const localEmpty = (state.data.expenses.length + state.data.income.length
+                + state.data.uncollected.length + state.data.loans.length) === 0;
+              if (localEmpty) {
+                // First-time configuration with existing cloud data — adopt
+                // silently. No "conflict" with a fresh device.
+                const next = migrate(result.remote);
+                next.dataModifiedAt = result.lastModified;
+                state.data = next;
+                saveData(next);
+                sync.lastEditedBy = result.lastEditedBy;
+                render();
+                showToast('Loaded ledger from cloud.', 'success');
+                return;
+              }
+              sync.pendingConflict = result;
+              showConflictModal();
+              render();
+              return;
+            }
+          }
+        }
+
+        await syncPush();
+        if (sync.status === 'idle') showToast('Synced to cloud.', 'success');
+      } catch (err) {
+        handleSyncError(err);
+      }
+      render();
+    }
+
+    async function actSyncTest() {
+      try {
+        const r = await syncTestConnection();
+        const broadScopes = r.scopes.filter(s => s !== 'gist');
+        if (broadScopes.length) {
+          showToast(`Connected as ${r.login}. Token has scopes beyond 'gist': ${broadScopes.join(', ')}. Consider using a token scoped to gist only.`, 'info');
+        } else {
+          showToast(`Connected as ${r.login}. Scopes: ${r.scopes.join(', ') || '(none)'} ✓`, 'success');
+        }
+      } catch (err) {
+        handleSyncError(err);
+        showToast(`Test failed: ${err.message || err}`, 'error');
+      }
+      render();
+    }
+
+    function actSyncDisconnect() {
+      if (!confirm('Disconnect sync on this device? The token, gist ID, and cached passphrase will be cleared. Your local ledger data is untouched.')) return;
+      setSyncToken('');
+      setSyncGistId('');
+      clearSyncKeyCache();
+      if (sync.pushTimer) { clearTimeout(sync.pushTimer); sync.pushTimer = null; }
+      setSyncStatus('unconfigured');
+      render();
+    }
+
+    function actConflictLoadCloud() {
+      const c = sync.pendingConflict;
+      if (!c) return;
+      // Replace local with cloud, preserving the cloud's dataModifiedAt so we
+      // don't bounce the timestamp forward and trigger an unnecessary push.
+      const next = migrate(c.remote);
+      next.dataModifiedAt = c.lastModified;
+      state.data = next;
+      saveData(next);
+      sync.pendingConflict = null;
+      dismissConflictModal();
+      render();
+      showToast('Loaded cloud copy.', 'success');
+    }
+
+    function actConflictKeepLocal() {
+      sync.pendingConflict = null;
+      dismissConflictModal();
+      // Force an immediate push so cloud catches up
+      schedulePush();
+      // Also try a sooner push than 3s
+      if (sync.pushTimer) { clearTimeout(sync.pushTimer); sync.pushTimer = null; }
+      syncPush();
+      render();
+    }
+
     const VIEW_RENDERERS = {
       overview: viewOverview,
       expenses: viewExpenses,
@@ -2577,6 +3262,9 @@
     function render() {
       const renderer = VIEW_RENDERERS[state.tab] || viewOverview;
       root.innerHTML = layout(renderer());
+      // Re-paint sync indicator after every render so the sidebar pill /
+      // mobile dot reflect current sync.status across tab switches.
+      if (typeof paintSyncIndicator === 'function') paintSyncIndicator();
     }
 
     // ============ Dropdown open/close (DOM-driven) ============
@@ -2744,6 +3432,35 @@
         if (fi) fi.click();
         return;
       }
+
+      // PWA
+      if (action === 'install-pwa') {
+        if (!pwa.deferredPrompt) return;
+        pwa.deferredPrompt.prompt();
+        pwa.deferredPrompt.userChoice.finally(() => {
+          pwa.deferredPrompt = null;
+          paintInstallButton();
+          render();
+        });
+        return;
+      }
+
+      // Sync
+      if (action === 'sync-save-and-push') return actSyncSaveAndPush();
+      if (action === 'sync-test')          return actSyncTest();
+      if (action === 'sync-disconnect')    return actSyncDisconnect();
+      if (action === 'open-sync-settings') {
+        state.tab = 'settings';
+        render();
+        // scroll the sync card into view after render
+        setTimeout(() => {
+          const card = document.querySelector('[data-sync-form]');
+          if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 0);
+        return;
+      }
+      if (action === 'conflict-load-cloud') return actConflictLoadCloud();
+      if (action === 'conflict-keep-local') return actConflictKeepLocal();
     }
 
     // ============ Dropdown keyboard navigation ============
@@ -2847,6 +3564,57 @@
 
     // Initial render
     render();
+
+    // Kick off sync (non-blocking). If unconfigured this is a no-op aside from
+    // setting indicator status. If configured, pulls the gist, decrypts, and
+    // surfaces any newer-cloud conflict via the modal.
+    if (typeof syncOnLoad === 'function') {
+      // micro-delay so the first paint lands before any sync UI updates
+      setTimeout(() => syncOnLoad().catch(err => console.warn('syncOnLoad failed:', err)), 0);
+    }
+
+    // ============ PWA: Service Worker + install prompt ============
+    // Skip on file:// (SW requires http or https). Default scope is derived
+    // from sw.js URL → /ledger/ when hosted at https://x.github.io/ledger/.
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .catch(err => console.warn('[ledger] SW registration failed:', err));
+      });
+    }
+
+    // Capture beforeinstallprompt for the in-app install button.
+    const pwa = { deferredPrompt: null, isStandalone: false, isIOS: false };
+    pwa.isStandalone =
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+      window.navigator.standalone === true;
+    pwa.isIOS = /iPad|iPhone|iPod/.test(window.navigator.userAgent) && !window.MSStream;
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      pwa.deferredPrompt = e;
+      paintInstallButton();
+    });
+    window.addEventListener('appinstalled', () => {
+      pwa.deferredPrompt = null;
+      pwa.isStandalone = true;
+      paintInstallButton();
+      showToast('Installed. Open from your home screen / dock.', 'success');
+    });
+
+    function paintInstallButton() {
+      document.querySelectorAll('[data-install-btn]').forEach(el => {
+        el.style.display = pwa.deferredPrompt && !pwa.isStandalone ? '' : 'none';
+      });
+    }
+
+    // One-time iOS hint toast: only when NOT installed and on iOS.
+    if (pwa.isIOS && !pwa.isStandalone && !sessionStorage.getItem('ventra-ios-hint-shown')) {
+      setTimeout(() => {
+        showToast('Tip: tap Share → Add to Home Screen to install Ventra Ledger.', 'info');
+        sessionStorage.setItem('ventra-ios-hint-shown', '1');
+      }, 1200);
+    }
   </script>
 
   <!-- Inlined vendored libraries (JSZip 3.10.1, jsPDF 2.5.2) so the EOFY pack works fully offline and the libraries are guaranteed to be available on `window` before any user click. Kept at the very end of <body> to keep first paint fast. -->

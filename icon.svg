@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Ventra Ledger icon — rounded dark tile + italic Fraunces L in lavender.
+       Used for the "any" PNG icons (192, 512, apple-touch 180) and as the
+       SVG fallback in the manifest. The maskable PNG uses a separate icon
+       (icon-maskable.svg) with full-bleed background. -->
+  <defs>
+    <clipPath id="rr"><rect x="0" y="0" width="512" height="512" rx="96" ry="96"/></clipPath>
+  </defs>
+  <g clip-path="url(#rr)">
+    <rect x="0" y="0" width="512" height="512" fill="#16181a"/>
+    <!-- subtle inset accent ring -->
+    <rect x="2" y="2" width="508" height="508" rx="94" ry="94"
+          fill="none" stroke="#c8b8ef" stroke-opacity="0.18" stroke-width="3"/>
+    <!-- Italic Fraunces L. Optical-size axis nudged to a display weight. -->
+    <text x="256" y="372" text-anchor="middle"
+          font-family="Fraunces, Georgia, serif"
+          font-style="italic"
+          font-weight="500"
+          font-size="380"
+          fill="#c8b8ef">L</text>
+  </g>
+</svg>

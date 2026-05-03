@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Maskable variant. No rounded corners; full-bleed dark fill so Android
+       can mask to whatever shape the launcher prefers. The L is kept inside
+       the 80% safe zone (center 410x410) so it survives circular crops. -->
+  <rect x="0" y="0" width="512" height="512" fill="#16181a"/>
+  <text x="256" y="348" text-anchor="middle"
+        font-family="Fraunces, Georgia, serif"
+        font-style="italic"
+        font-weight="500"
+        font-size="280"
+        fill="#c8b8ef">L</text>
+</svg>
