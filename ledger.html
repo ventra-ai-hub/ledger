@@ -1628,6 +1628,8 @@
         </div>
       `, 'p-6');
 
+      const gstCard = settings.gstEnabled ? basPreviewCard() : gstThresholdCard();
+
       return `
         <div class="space-y-6">
           <div>
@@ -1635,6 +1637,7 @@
             <h1 class="font-serif text-4xl md:text-5xl font-light text-stone-900 leading-[1.05]">${esc(periodLabel)}</h1>
           </div>
           ${summaryRow}
+          ${gstCard}
           ${splitCard}
           <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
             ${trendCard}
@@ -1643,6 +1646,171 @@
           ${recentCard}
         </div>`;
     }
+
+    // ============ GST threshold + BAS preview ============
+    // ATO Section 188-15 — "GST turnover" is the value of supplies made
+    // (gross), not net of refunds. We sum positive income only.
+    const GST_THRESHOLD = 75000;
+
+    function rollingGrossIncome(refDateISO = todayISO()) {
+      const ref = new Date(refDateISO);
+      const cutoff = new Date(ref);
+      cutoff.setFullYear(cutoff.getFullYear() - 1);
+      const c = cutoff.toISOString().slice(0, 10);
+      let total = 0;
+      for (const i of state.data.income) {
+        const a = parseAmount(i.amount);
+        if (a <= 0) continue;
+        if (i.date >= c && i.date <= refDateISO) total += a;
+      }
+      return total;
+    }
+
+    function avgMonthlyGross(months = 3, refDateISO = todayISO()) {
+      const ref = new Date(refDateISO);
+      let total = 0, monthsCounted = 0;
+      for (let i = 1; i <= months; i++) {
+        const d = new Date(ref.getFullYear(), ref.getMonth() - i, 1);
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        let m = 0;
+        for (const x of state.data.income) {
+          const a = parseAmount(x.amount);
+          if (a > 0 && monthKey(x.date) === key) m += a;
+        }
+        total += m; monthsCounted++;
+      }
+      return monthsCounted ? total / monthsCounted : 0;
+    }
+
+    function gstThresholdCard() {
+      const cur = state.data.settings.currency;
+      const rolling = rollingGrossIncome();
+      const pct = Math.min(100, (rolling / GST_THRESHOLD) * 100);
+
+      let level, color, message;
+      if (rolling >= GST_THRESHOLD) {
+        level = 'over';
+        color = { bg: 'var(--danger-bg)', fg: 'var(--danger)', bar: 'var(--danger)' };
+        message = 'Threshold crossed — register for GST within 21 days.';
+      } else if (rolling >= 70000) {
+        level = 'critical';
+        color = { bg: 'var(--danger-bg)', fg: 'var(--danger)', bar: 'var(--danger)' };
+        message = 'Approaching threshold — talk to your accountant about timing.';
+      } else if (rolling >= 60000) {
+        level = 'warn';
+        color = { bg: 'rgba(217,194,138,0.12)', fg: 'var(--warn)', bar: 'var(--warn)' };
+        message = 'Watch carefully — review monthly.';
+      } else {
+        level = 'ok';
+        color = { bg: 'var(--income-bg)', fg: 'var(--income)', bar: 'var(--income)' };
+        message = 'Well under threshold.';
+      }
+
+      // Project months until $75k crosses, using last 3 months' average.
+      const remaining = Math.max(0, GST_THRESHOLD - rolling);
+      const avgM = avgMonthlyGross(3);
+      let projection = '';
+      if (rolling >= GST_THRESHOLD) {
+        projection = '';
+      } else if (avgM <= 0) {
+        projection = '<span class="text-stone-500">No recent income — can\'t project crossing.</span>';
+      } else {
+        const months = Math.ceil(remaining / avgM);
+        projection = months >= 24
+          ? `At the recent pace (~${esc(fmt(avgM, cur))}/mo) the threshold is more than 24 months away.`
+          : `At the recent pace (~${esc(fmt(avgM, cur))}/mo) the threshold is about <strong class="text-stone-800">${months} ${months === 1 ? 'month' : 'months'}</strong> away.`;
+      }
+
+      return card(`
+        <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">GST registration threshold</div>
+            <h2 class="font-serif text-2xl font-light text-stone-900">Rolling 12-month gross</h2>
+            <div class="text-xs text-stone-500 mt-1">ATO threshold for compulsory GST registration is ${esc(fmt(GST_THRESHOLD, cur))} of gross supplies.</div>
+          </div>
+          <div class="text-right">
+            <div class="text-[28px] font-medium text-stone-900 tabular-nums font-mono leading-none">${esc(fmt(rolling, cur))}</div>
+            <div class="text-xs mt-1" style="color: ${color.fg};">${esc(message)}</div>
+          </div>
+        </div>
+        <div class="h-3 rounded-full overflow-hidden mb-3" style="background-color: var(--surface-2);">
+          <div class="h-full rounded-full transition-all duration-700" style="width:${pct}%; background-color: ${color.bar};"></div>
+        </div>
+        <div class="flex items-center justify-between text-[11px] text-stone-500 mb-3">
+          <span>${pct.toFixed(0)}% of threshold</span>
+          <span>${esc(fmt(GST_THRESHOLD - rolling, cur))} remaining</span>
+        </div>
+        ${projection ? `<div class="text-xs text-stone-500">${projection}</div>` : ''}
+      `, 'p-6');
+    }
+
+    // BAS preview — shown in place of the threshold card when GST is enabled.
+    // Quarter selection mirrors the active period mode:
+    //   • Quarter mode → the selected quarter
+    //   • Month / FY  → the quarter containing today (= the BAS period currently
+    //     being built up; useful for "where are we so far this quarter?")
+    function basPreviewCard() {
+      const cur = state.data.settings.currency;
+      const rate = Number(state.data.settings.gstRate || 10);
+
+      const qObj = state.period === 'quarter' ? state.currentQuarter : currentQuarter();
+      const range = quarterRange(qObj);
+      const isInQ = (iso) => iso >= range.start && iso <= range.end;
+
+      let grossCollected = 0; // sum of positive income in the quarter
+      for (const i of state.data.income) {
+        const a = parseAmount(i.amount);
+        if (a > 0 && isInQ(i.date)) grossCollected += a;
+      }
+      // Assumption noted in the UI: when registered, all income treated as
+      // GST-inclusive. GST owed = gross × rate / (100 + rate).
+      const gstCollected = grossCollected * rate / (100 + rate);
+
+      let gstClaimable = 0;
+      for (const e of state.data.expenses) {
+        if (!e.gstInclusive) continue;
+        if (!isInQ(e.date)) continue;
+        const a = parseAmount(e.amount);
+        gstClaimable += a * rate / (100 + rate);
+      }
+      const netLiability = gstCollected - gstClaimable;
+      const isRefund = netLiability < 0;
+
+      const today = todayISO();
+      const inProgress = today >= range.start && today <= range.end;
+
+      return card(`
+        <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">BAS preview${inProgress ? ' · in progress' : ''}</div>
+            <h2 class="font-serif text-2xl font-light text-stone-900">${esc(quarterShort(qObj))} ${qObj.fy} (Q${qObj.q})</h2>
+            <div class="text-xs text-stone-500 mt-1">Treats all income as GST-inclusive at ${rate}%. Claimable GST is the GST component of expenses you've marked GST-inclusive.</div>
+          </div>
+          <div class="text-right">
+            <div class="text-[28px] font-medium tabular-nums font-mono leading-none ${isRefund ? '' : 'text-stone-900'}" style="${isRefund ? 'color: var(--income);' : ''}">${isRefund ? '-' : ''}${esc(fmt(Math.abs(netLiability), cur))}</div>
+            <div class="text-xs mt-1" style="color: ${isRefund ? 'var(--income)' : 'var(--text-muted)'};">${isRefund ? 'Net refund expected' : 'Net BAS liability'}</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div class="rounded-2xl p-4" style="background-color: var(--surface-2);">
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">GST collected (1A)</div>
+            <div class="text-lg font-medium tabular-nums font-mono text-stone-900">${esc(fmt(gstCollected, cur))}</div>
+            <div class="text-[11px] text-stone-500 mt-1">${esc(fmt(grossCollected, cur))} gross income × ${rate}/${100+rate}</div>
+          </div>
+          <div class="rounded-2xl p-4" style="background-color: var(--surface-2);">
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">GST claimable (1B)</div>
+            <div class="text-lg font-medium tabular-nums font-mono text-stone-900">${esc(fmt(gstClaimable, cur))}</div>
+            <div class="text-[11px] text-stone-500 mt-1">From GST-inclusive expenses this quarter</div>
+          </div>
+          <div class="rounded-2xl p-4" style="background-color: var(--surface-2);">
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Net (1A − 1B)</div>
+            <div class="text-lg font-medium tabular-nums font-mono ${isRefund ? '' : 'text-stone-900'}" style="${isRefund ? 'color: var(--income);' : ''}">${isRefund ? '-' : ''}${esc(fmt(Math.abs(netLiability), cur))}</div>
+            <div class="text-[11px] text-stone-500 mt-1">${isRefund ? 'ATO owes you' : 'You owe ATO'}</div>
+          </div>
+        </div>
+      `, 'p-6');
+    }
+
     // ============ LedgerTab (Expenses + Income) ============
     function ledgerMeta(kind) {
       const isExpense = kind === 'expense';
