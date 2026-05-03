@@ -606,6 +606,18 @@
       }
     }
 
+    // Per-device display preference: show the dashboard charts (default true).
+    // Stored separately from synced settings — different partners can have
+    // different chart-noise tolerance.
+    const SHOW_CHARTS_KEY = 'ventra-ledger-show-charts';
+    function showCharts() {
+      const v = localStorage.getItem(SHOW_CHARTS_KEY);
+      return v === null ? true : v === '1';
+    }
+    function setShowCharts(v) {
+      localStorage.setItem(SHOW_CHARTS_KEY, v ? '1' : '0');
+    }
+
     function loadUser() { return localStorage.getItem(USER_KEY) || ''; }
     function saveUser(name) {
       if (name) localStorage.setItem(USER_KEY, name);
@@ -2154,7 +2166,7 @@
         </div>`;
 
       const concentration = isExpense ? vendorConcentrationBlock(filtered) : '';
-      const charts = isExpense ? expenseChartsBlock() : incomeChartsBlock();
+      const charts = showCharts() ? (isExpense ? expenseChartsBlock() : incomeChartsBlock()) : '';
 
       return `
         <div class="space-y-6">
@@ -2647,7 +2659,7 @@
         </div>`;
 
       const chartHeight = isNarrowViewport() ? '240px' : '300px';
-      const chartsRow = card(`
+      const chartsRow = !showCharts() ? '' : card(`
         <div class="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div>
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Revenue concentration</div>
@@ -2671,7 +2683,11 @@
       `, 'overflow-hidden');
 
       // Apply data-sr-target to donut canvas dynamically via attribute (above)
-      const chartsHTML = chartsRow.replace('id="ch-customer-donut"', 'id="ch-customer-donut" data-sr-target="ch-customer-donut-sr"');
+      // chartsRow is '' when the user has charts toggled off — guard the
+      // dataset hookup so .replace() doesn't run on an empty string.
+      const chartsHTML = chartsRow
+        ? chartsRow.replace('id="ch-customer-donut"', 'id="ch-customer-donut" data-sr-target="ch-customer-donut-sr"')
+        : '';
 
       return `
         <div class="space-y-6">
@@ -3224,7 +3240,7 @@
             ${partnerSplit}
             ${gstCard}
           </div>
-          ${card(`
+          ${showCharts() ? card(`
             <div class="p-5 pb-0">
               <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Category breakdown</div>
               <h2 class="font-serif text-xl font-light text-stone-900">FY${targetFY} expenses by month and category</h2>
@@ -3234,7 +3250,7 @@
                 aria-label="FY expenses by category and month" aria-describedby="ch-tax-stack-sr"></canvas>
               <div id="ch-tax-stack-sr" data-sr></div>
             </div>
-          `)}
+          `) : ''}
           ${card(`
             <div class="p-5 pb-0">
               <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Expenses by category</div>
@@ -3999,6 +4015,18 @@
         ${state.userName ? `<div class="text-xs text-stone-500 mt-3">Currently signed in as <strong class="text-stone-800">${esc(state.userName)}</strong>.</div>` : ''}
       `, 'p-6');
 
+      const displayCard = card(`
+        <h2 class="text-sm font-medium text-stone-900 mb-1">Display</h2>
+        <p class="text-sm text-stone-500 mb-4">Per-device — doesn't sync. Each partner can choose differently.</p>
+        <label class="flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-white cursor-pointer" style="${shadowField}">
+          <div class="flex-1 min-w-0">
+            <div class="text-sm text-stone-900 font-medium">Show charts</div>
+            <div class="text-xs text-stone-500 mt-0.5">Donuts, trend lines, and stacked bars on Customers, Income, Expenses, and Tax. Tables always remain.</div>
+          </div>
+          <input type="checkbox" data-action="toggle-show-charts" ${showCharts() ? 'checked' : ''} class="w-5 h-5 cursor-pointer flex-shrink-0" style="accent-color: var(--accent);">
+        </label>
+      `, 'p-6');
+
       const dataRecoveryCard = card(`
         <h2 class="text-sm font-medium text-stone-900 mb-1">Data recovery</h2>
         <p class="text-sm text-stone-500 mb-2">
@@ -4038,6 +4066,7 @@
           ${syncCard}
           ${gstCard}
           ${userCard}
+          ${displayCard}
           ${dataRecoveryCard}
           ${dangerCard}
         </div>`;
@@ -4828,6 +4857,13 @@
       if (action === 'import-json') {
         const fi = document.querySelector('[data-json-input]');
         if (fi) fi.click();
+        return;
+      }
+
+      // Display preferences (per-device)
+      if (action === 'toggle-show-charts') {
+        setShowCharts(!!el.checked);
+        render();
         return;
       }
 
