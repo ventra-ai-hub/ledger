@@ -4639,6 +4639,9 @@
       }
 
     };
+    // Track instances keyed by the canvas ELEMENT (not by canvas.id). Using
+    // the element itself as the key sidesteps any id-reuse confusion when the
+    // app re-renders and a new <canvas> takes over the same id slot.
     const _charts = new Map();
     function destroyAllCharts() {
       for (const c of _charts.values()) { try { c.destroy(); } catch {} }
@@ -4650,14 +4653,33 @@
         const key = canvas.dataset.chart;
         const builder = CHART_BUILDERS[key];
         if (!builder) return;
+        // Defensive: if Chart.js's internal registry still thinks something
+        // owns this canvas (e.g. an earlier .destroy() threw silently and was
+        // swallowed), tear it down before constructing a new one. Without
+        // this Chart.js v4 throws "Canvas is already in use" on the next
+        // construction and the canvas stays blank.
+        const orphan = Chart.getChart(canvas);
+        if (orphan) { try { orphan.destroy(); } catch {} }
         const cfg = builder(canvas);
         if (!cfg) return;
         try {
           const chart = new Chart(canvas, cfg);
-          _charts.set(canvas.id || (canvas.id = `chart-${Math.random().toString(36).slice(2,8)}`), chart);
+          _charts.set(canvas, chart);
         } catch (err) {
           console.warn('[chart] init failed for', key, err);
         }
+      });
+    }
+    // Single-pending init token. If render() fires multiple times before the
+    // next animation frame (e.g. user clicks Period mode quickly), only one
+    // initCharts pass runs, and it sees the latest DOM state.
+    let _chartInitPending = false;
+    function scheduleChartInit() {
+      if (_chartInitPending) return;
+      _chartInitPending = true;
+      requestAnimationFrame(() => {
+        _chartInitPending = false;
+        initCharts();
       });
     }
     // Re-flow chart sizes on viewport resize without destroying instances.
@@ -4677,9 +4699,10 @@
       const renderer = VIEW_RENDERERS[state.tab] || viewOverview;
       root.innerHTML = layout(renderer());
       if (typeof paintSyncIndicator === 'function') paintSyncIndicator();
-      // Init any charts the freshly-rendered view declared. Microtask-deferred
-      // so layout has settled before Chart.js measures container size.
-      Promise.resolve().then(initCharts);
+      // rAF defers init until layout has actually committed. Microtask used to
+      // run before paint and Chart.js's responsive sizing could measure stale
+      // container dimensions on subsequent renders. rAF fires after layout.
+      scheduleChartInit();
     }
 
     // ============ Dropdown open/close (DOM-driven) ============
@@ -4770,8 +4793,14 @@
             if (check) check.style.visibility = isSel ? 'visible' : 'hidden';
           });
           closeDropdown(wrap);
-          const trigger = wrap.querySelector('.dd-trigger');
-          if (trigger) trigger.focus({ preventScroll: true });
+          // Only restore focus to the trigger if NOT forwarding to another
+          // action — the forwarded action (e.g. pick-month) re-renders and
+          // would wipe the trigger element, leaving a stale focus target
+          // that can confuse Chrome/Safari paint timing.
+          if (!el.dataset.emit) {
+            const trigger = wrap.querySelector('.dd-trigger');
+            if (trigger) trigger.focus({ preventScroll: true });
+          }
         }
         if (el.dataset.emit) dispatch(el.dataset.emit, el);
         return;
