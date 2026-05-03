@@ -618,7 +618,8 @@
       filterExpense: 'all',          // 'all' or period key
       filterIncome: 'all',
       sortExpense: { field: 'date', dir: 'desc' },
-      sortIncome: { field: 'date', dir: 'desc' }
+      sortIncome: { field: 'date', dir: 'desc' },
+      sortCustomers: { field: 'net', dir: 'desc' }
     };
 
     // Stamp an entry with editedBy + editedAt (from current userName, if set)
@@ -1120,7 +1121,11 @@
       arrowDownRight: '<path d="m7 7 10 10"/><path d="M17 7v10H7"/>',
       fileText: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/>',
       printer: '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V2h12v7"/><rect width="12" height="8" x="6" y="14"/>',
-      calculator: '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>'
+      calculator: '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>',
+      users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+      trendingUp: '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+      trendingDown: '<polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/>',
+      sparkle: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .963L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>'
     };
     function icon(name, size = 16, extraClass = '') {
       const path = ICON_PATHS[name] || '';
@@ -1253,16 +1258,22 @@
       { id: 'overview',    label: 'Overview',    icon: 'layoutDashboard' },
       { id: 'expenses',    label: 'Expenses',    icon: 'receipt' },
       { id: 'income',      label: 'Income',      icon: 'banknote' },
+      { id: 'customers',   label: 'Customers',   icon: 'users' },
       { id: 'uncollected', label: 'Uncollected', icon: 'clock' },
       { id: 'loans',       label: 'Loans',       icon: 'handCoins' },
       { id: 'tax',         label: 'Tax',         icon: 'calculator' },
       { id: 'settings',    label: 'Settings',    icon: 'settings' }
     ];
 
-    // Mobile bottom bar shows a slimmed-down set; the rest are reachable via More (Settings covers it).
-    const MOBILE_TABS = ['overview', 'expenses', 'income', 'tax', 'settings'];
+    // Mobile bottom bar — five most-frequent destinations.
+    // Customers replaces Income on mobile because Customers IS the rolled-up
+    // income view; per-row income editing happens on desktop. Tax stays so
+    // EOFY pack is reachable on phone. Loans / Uncollected / Settings via the
+    // gear or via /ledger/ledger.html#settings (Settings is the 5th).
+    const MOBILE_TABS = ['overview', 'expenses', 'customers', 'tax', 'settings'];
 
     // Which tabs show the month/FY period selector in the header.
+    // Customers is lifetime-grain so doesn't get the period strip.
     const PERIOD_TABS = new Set(['overview', 'expenses', 'income', 'tax']);
 
     function sidebar() {
@@ -1629,6 +1640,7 @@
       `, 'p-6');
 
       const gstCard = settings.gstEnabled ? basPreviewCard() : gstThresholdCard();
+      const insightsCard = whatChangedCard();
 
       return `
         <div class="space-y-6">
@@ -1637,6 +1649,7 @@
             <h1 class="font-serif text-4xl md:text-5xl font-light text-stone-900 leading-[1.05]">${esc(periodLabel)}</h1>
           </div>
           ${summaryRow}
+          ${insightsCard}
           ${gstCard}
           ${splitCard}
           <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -1645,6 +1658,174 @@
           </div>
           ${recentCard}
         </div>`;
+    }
+
+    // ============ "What changed" insights feed ============
+    // Plain-English bullets generated from a small rule set. Each rule may
+    // skip itself when its threshold isn't met. Always returns ≤5; falls
+    // back to a soft summary if nothing pops.
+    function generateInsights() {
+      const out = [];
+      const cur = state.data.settings.currency;
+      const today = todayISO();
+      const todayDate = new Date(today);
+
+      // ---- Rule 1: GST threshold proximity (only above $50k rolling) ----
+      const rolling = rollingGrossIncome();
+      if (!state.data.settings.gstEnabled && rolling >= 50000) {
+        if (rolling >= GST_THRESHOLD) {
+          out.push({
+            icon: 'sparkle', tone: 'danger',
+            text: `<strong>You've crossed the GST threshold.</strong> Rolling 12-month gross is ${esc(fmt(rolling, cur))}. Register for GST within 21 days.`
+          });
+        } else {
+          const remaining = GST_THRESHOLD - rolling;
+          out.push({
+            icon: 'sparkle', tone: rolling >= 70000 ? 'danger' : 'warn',
+            text: `Rolling 12-month gross is <strong>${esc(fmt(rolling, cur))}</strong> — <strong>${esc(fmt(remaining, cur))}</strong> from the GST threshold.`
+          });
+        }
+      }
+
+      // ---- Rule 2: vendor with biggest MoM increase ----
+      // Compares the calendar month containing today vs the prior calendar
+      // month, so this surface in the feed regardless of what period the
+      // user is currently viewing.
+      const thisMonthKey = monthKey(today);
+      const prevMonthDate = new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1);
+      const prevMonthKey = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth()+1).padStart(2,'0')}`;
+      const groupExp = (key) => {
+        const m = new Map();
+        for (const e of state.data.expenses) {
+          if (monthKey(e.date) !== key) continue;
+          const k = (e.vendor || '').trim().toLowerCase();
+          if (!k) continue;
+          const cur = m.get(k) || { label: e.vendor.trim(), total: 0 };
+          cur.total += parseAmount(e.amount);
+          m.set(k, cur);
+        }
+        return m;
+      };
+      const cur_v = groupExp(thisMonthKey);
+      const prev_v = groupExp(prevMonthKey);
+      let topJump = null;
+      for (const [k, v] of cur_v) {
+        const prev = prev_v.get(k);
+        if (!prev) continue;
+        const delta = v.total - prev.total;
+        if (prev.total < 50 || delta < 50) continue; // ignore noise
+        const pct = (delta / prev.total) * 100;
+        if (pct < 25) continue;
+        if (!topJump || delta > topJump.delta) topJump = { label: v.label, prev: prev.total, now: v.total, delta, pct };
+      }
+      if (topJump) {
+        out.push({
+          icon: 'trendingUp', tone: 'warn',
+          text: `<strong>${esc(topJump.label)}</strong> spend is up <strong>${topJump.pct.toFixed(0)}%</strong> this month (${esc(fmt(topJump.prev, cur))} → ${esc(fmt(topJump.now, cur))}).`
+        });
+      }
+
+      // ---- Rule 3: best revenue month (positive income only) ----
+      const monthRevenue = new Map();
+      for (const i of state.data.income) {
+        const a = parseAmount(i.amount);
+        if (a <= 0) continue;
+        const k = monthKey(i.date);
+        if (!k) continue;
+        monthRevenue.set(k, (monthRevenue.get(k) || 0) + a);
+      }
+      if (monthRevenue.size >= 2) {
+        const sorted = [...monthRevenue.entries()].sort((a, b) => b[1] - a[1]);
+        const [bestKey, bestTotal] = sorted[0];
+        const [y, m] = bestKey.split('-').map(Number);
+        const monthName = `${MONTHS_FULL[m - 1]} ${y}`;
+        if (bestKey === thisMonthKey) {
+          out.push({
+            icon: 'sparkle', tone: 'income',
+            text: `<strong>${esc(monthName)} is your best revenue month so far</strong> — ${esc(fmt(bestTotal, cur))} gross.`
+          });
+        } else {
+          // Only mention if best month was within the last 6 months and is meaningfully bigger
+          const cutoff = new Date(todayDate.getFullYear(), todayDate.getMonth() - 5, 1);
+          const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth()+1).padStart(2,'0')}`;
+          if (bestKey >= cutoffKey) {
+            const second = sorted[1] ? sorted[1][1] : 0;
+            const margin = second > 0 ? ((bestTotal / second) - 1) * 100 : 0;
+            if (margin >= 5) {
+              out.push({
+                icon: 'sparkle', tone: 'income',
+                text: `<strong>${esc(monthName)}</strong> was your best recent month — ${esc(fmt(bestTotal, cur))} gross${margin >= 5 ? `, ${margin.toFixed(0)}% above the next` : ''}.`
+              });
+            }
+          }
+        }
+      }
+
+      // ---- Rule 4: 30-day net cash flow ----
+      const thirtyAgo = new Date(todayDate); thirtyAgo.setDate(thirtyAgo.getDate() - 30);
+      const cutoff30 = thirtyAgo.toISOString().slice(0, 10);
+      let inc30 = 0, exp30 = 0, nIn = 0, nOut = 0;
+      for (const i of state.data.income) {
+        if (i.date >= cutoff30 && i.date <= today) {
+          const a = parseAmount(i.amount);
+          if (a >= 0) inc30 += a;
+          else inc30 += a; // refunds reduce inflow
+          nIn++;
+        }
+      }
+      for (const e of state.data.expenses) {
+        if (e.date >= cutoff30 && e.date <= today) { exp30 += parseAmount(e.amount); nOut++; }
+      }
+      const net30 = inc30 - exp30;
+      if (nIn + nOut > 0) {
+        if (net30 >= 0) {
+          out.push({
+            icon: 'trendingUp', tone: 'income',
+            text: `Last 30 days: <strong>${esc(fmt(net30, cur))} cash flow positive</strong> (${esc(fmt(inc30, cur))} in, ${esc(fmt(exp30, cur))} out).`
+          });
+        } else {
+          out.push({
+            icon: 'trendingDown', tone: 'danger',
+            text: `Last 30 days: <strong>${esc(fmt(Math.abs(net30), cur))} cash flow negative</strong> (${esc(fmt(inc30, cur))} in, ${esc(fmt(exp30, cur))} out).`
+          });
+        }
+      }
+
+      // Soft fallback if no rule fired
+      if (out.length === 0) {
+        const totalIncome = state.data.income.filter(i => parseAmount(i.amount) > 0).reduce((s, i) => s + parseAmount(i.amount), 0);
+        out.push({ icon: 'sparkle', tone: 'muted', text: `Lifetime gross income: <strong>${esc(fmt(totalIncome, cur))}</strong> across ${state.data.income.filter(i => parseAmount(i.amount) > 0).length} payments.` });
+      }
+
+      return out.slice(0, 5);
+    }
+
+    function whatChangedCard() {
+      const insights = generateInsights();
+      if (insights.length === 0) return '';
+      const toneColor = (t) => ({
+        danger: 'var(--danger)', warn: 'var(--warn)',
+        income: 'var(--income)', muted: 'var(--text-muted)'
+      })[t] || 'var(--text-muted)';
+      const items = insights.map(i => `
+        <div class="flex items-start gap-3 py-3 first:pt-0 last:pb-0" style="border-bottom: 1px solid var(--border);">
+          <div class="w-7 h-7 flex-shrink-0 rounded-xl flex items-center justify-center mt-0.5" style="background-color: var(--surface-2); color: ${toneColor(i.tone)};">
+            ${icon(i.icon, 13)}
+          </div>
+          <div class="text-sm text-stone-700 leading-relaxed">${i.text}</div>
+        </div>
+      `).join('');
+
+      return card(`
+        <div class="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">What changed</div>
+            <h2 class="font-serif text-xl font-light text-stone-900">Worth knowing</h2>
+          </div>
+        </div>
+        <div class="space-y-0">${items}</div>
+        <div class="text-[10px] text-stone-500 mt-3">Auto-generated from this device's data — won't surface anything that needs the cloud.</div>
+      `, 'p-6');
     }
 
     // ============ GST threshold + BAS preview ============
@@ -1964,6 +2145,8 @@
           </table>
         </div>`;
 
+      const concentration = isExpense ? vendorConcentrationBlock(filtered) : '';
+
       return `
         <div class="space-y-6">
           <div class="flex items-end justify-between flex-wrap gap-4">
@@ -1980,8 +2163,133 @@
           </div>
           ${addForm}
           ${filterRow}
+          ${concentration}
           ${card(table, 'overflow-hidden')}
         </div>`;
+    }
+
+    // ============ Vendor concentration ============
+    // Top 10 vendors by spend within the visible expense rows. Compares
+    // each vendor against the same-length window immediately prior:
+    //   month   → previous month
+    //   quarter → previous quarter
+    //   fy      → previous FY
+    function priorPeriodExpenses(allExpenses) {
+      if (state.period === 'month') {
+        const [y, m] = state.currentMonth.split('-').map(Number);
+        const d = new Date(y, m - 2, 1); // m-2 because Date months are 0-based and we want previous
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        return allExpenses.filter(x => monthKey(x.date) === key);
+      }
+      if (state.period === 'quarter') {
+        const prev = previousQuarter(state.currentQuarter);
+        return allExpenses.filter(x => isoInQuarter(x.date, prev));
+      }
+      const prevFY = state.currentFY - 1;
+      return allExpenses.filter(x => isoInFY(x.date, prevFY));
+    }
+
+    function vendorConcentrationBlock(currentExpenses) {
+      // Only show concentration when there's a meaningful sample to compare.
+      if (!currentExpenses.length) return '';
+      const cur = state.data.settings.currency;
+      const totalCurrent = currentExpenses.reduce((s, e) => s + parseAmount(e.amount), 0);
+      if (totalCurrent <= 0) return '';
+
+      const groupVendor = (rows) => {
+        const m = new Map();
+        for (const e of rows) {
+          const raw = (e.vendor || '').trim();
+          if (!raw) continue;
+          const key = raw.toLowerCase();
+          const cur = m.get(key) || { label: raw, total: 0, count: 0, latestDate: '' };
+          cur.total += parseAmount(e.amount);
+          cur.count += 1;
+          if (!cur.latestDate || (e.date || '') >= cur.latestDate) { cur.label = raw; cur.latestDate = e.date || ''; }
+          m.set(key, cur);
+        }
+        return m;
+      };
+
+      const cur_g = groupVendor(currentExpenses);
+      // Fetch prior-period expense rows (across the *whole* dataset, not the
+      // currently filtered table rows — we need the prior bucket regardless).
+      const prior_g = groupVendor(priorPeriodExpenses(state.data.expenses));
+
+      const rows = [...cur_g.entries()].map(([key, v]) => {
+        const prior = prior_g.get(key);
+        const priorTotal = prior ? prior.total : 0;
+        let mom = null;
+        if (priorTotal > 0) mom = ((v.total - priorTotal) / priorTotal) * 100;
+        else if (priorTotal === 0 && v.total > 0) mom = null; // "new" — handled below
+        return {
+          label: v.label,
+          total: v.total,
+          pct: (v.total / totalCurrent) * 100,
+          mom, // null when prior was 0 (new vendor or no comparison)
+          isNew: !prior,
+          count: v.count,
+        };
+      });
+
+      rows.sort((a, b) => b.total - a.total);
+      const top = rows.slice(0, 10);
+      const maxTotal = top[0]?.total || 1;
+      const periodWord = state.period === 'month' ? 'month' : state.period === 'quarter' ? 'quarter' : 'FY';
+      const compareWord = state.period === 'month' ? 'vs prior month' : state.period === 'quarter' ? 'vs prior quarter' : 'vs prior FY';
+
+      const flagPills = (r) => {
+        const pills = [];
+        if (r.pct > 15) pills.push(`<span class="px-2 py-0.5 rounded-full text-[10px] tracking-[0.05em] uppercase font-medium" style="background-color: var(--danger-bg); color: var(--danger);">Concentration</span>`);
+        if (r.mom !== null && r.mom > 50) pills.push(`<span class="px-2 py-0.5 rounded-full text-[10px] tracking-[0.05em] uppercase font-medium" style="background-color: rgba(217,194,138,0.18); color: var(--warn);">+${r.mom.toFixed(0)}% spike</span>`);
+        return pills.join(' ');
+      };
+
+      const momCell = (r) => {
+        if (r.mom === null) return r.isNew ? `<span class="text-stone-500 text-xs">new</span>` : `<span class="text-stone-500 text-xs">—</span>`;
+        const up = r.mom > 0;
+        const arrow = up ? '↑' : r.mom < 0 ? '↓' : '·';
+        const color = up ? (r.mom > 50 ? 'var(--warn)' : 'var(--text-muted)') : 'var(--income)';
+        return `<span class="tabular-nums font-mono text-xs" style="color: ${color};">${arrow} ${Math.abs(r.mom).toFixed(0)}%</span>`;
+      };
+
+      const body = top.map(r => `
+        <tr style="border-bottom: 1px solid var(--border);">
+          <td class="px-4 md:px-5 py-3 text-stone-900">
+            <div class="truncate max-w-[220px]" title="${attr(r.label)}">${esc(r.label)}</div>
+            <div class="mt-1.5 h-1 rounded-full overflow-hidden" style="background-color: var(--surface-2);">
+              <div class="h-full rounded-full" style="width:${(r.total / maxTotal) * 100}%; background-color: var(--expense);"></div>
+            </div>
+          </td>
+          <td class="px-4 md:px-5 py-3 text-right tabular-nums font-mono">${esc(fmt(r.total, cur))}</td>
+          <td class="px-4 md:px-5 py-3 text-right tabular-nums text-xs text-stone-500">${r.pct.toFixed(1)}%</td>
+          <td class="px-4 md:px-5 py-3 text-right">${momCell(r)}</td>
+          <td class="px-4 md:px-5 py-3 text-right">${flagPills(r)}</td>
+        </tr>`).join('');
+
+      return card(`
+        <div class="px-5 pt-5 flex items-start justify-between flex-wrap gap-3">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Top 10 vendors this ${periodWord}</div>
+            <h2 class="font-serif text-xl font-light text-stone-900">Where the money's going</h2>
+            <div class="text-xs text-stone-500 mt-1">% of ${esc(fmt(totalCurrent, cur))} total · MoM ${esc(compareWord)}</div>
+          </div>
+        </div>
+        <div class="overflow-x-auto mt-3">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid var(--border);">
+                <th class="text-left font-medium px-4 md:px-5 py-3">Vendor</th>
+                <th class="text-right font-medium px-4 md:px-5 py-3 whitespace-nowrap">Total</th>
+                <th class="text-right font-medium px-4 md:px-5 py-3 whitespace-nowrap">% of total</th>
+                <th class="text-right font-medium px-4 md:px-5 py-3 whitespace-nowrap">${esc(compareWord)}</th>
+                <th class="text-right font-medium px-4 md:px-5 py-3 whitespace-nowrap">Flag</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `, 'overflow-hidden');
     }
 
     function ledgerRow(item, M) {
@@ -2039,6 +2347,151 @@
 
     function viewExpenses() { return viewLedger('expense'); }
     function viewIncome()   { return viewLedger('income');  }
+
+    // ============ Customer Summary ============
+    // Lifetime view of who's paid us what. Groups income by source, keyed
+    // case-insensitively (so "Joe@x.com" and "joe@x.com" land in the same
+    // bucket). No status pills, no churn judgement — Dan's December soft
+    // reset means refund rows are operational, not churn signal.
+    function aggregateCustomers(income) {
+      const map = new Map();
+      for (const i of income) {
+        const raw = (i.source || '').trim();
+        if (!raw) continue;
+        const key = raw.toLowerCase();
+        let c = map.get(key);
+        if (!c) {
+          c = {
+            key, label: raw, latestLabelDate: i.date || '',
+            lifetimeGross: 0, refunded: 0, net: 0, count: 0,
+            firstPayment: null, lastPayment: null
+          };
+          map.set(key, c);
+        }
+        // Use the most-recent entry's casing for display.
+        if (!c.latestLabelDate || (i.date || '') >= c.latestLabelDate) {
+          c.label = raw;
+          c.latestLabelDate = i.date || '';
+        }
+        const a = parseAmount(i.amount);
+        if (a >= 0) {
+          c.lifetimeGross += a;
+          c.count += 1;
+          if (!c.firstPayment || i.date < c.firstPayment) c.firstPayment = i.date;
+          if (!c.lastPayment  || i.date > c.lastPayment)  c.lastPayment  = i.date;
+        } else {
+          c.refunded += -a;
+        }
+        c.net = c.lifetimeGross - c.refunded;
+      }
+      return [...map.values()];
+    }
+
+    function viewCustomers() {
+      const { income, settings } = state.data;
+      const cur = settings.currency;
+      const customers = aggregateCustomers(income);
+      const sortBy = state.sortCustomers;
+
+      const arrow = (field) => sortBy.field === field ? (sortBy.dir === 'asc' ? ' ↑' : ' ↓') : '';
+      const compareDate = (s) => s || '0000-00-00';
+      customers.sort((a, b) => {
+        const f = sortBy.field;
+        let av, bv;
+        if (f === 'firstPayment' || f === 'lastPayment') {
+          av = compareDate(a[f]); bv = compareDate(b[f]);
+        } else if (f === 'label') {
+          av = (a.label || '').toLowerCase(); bv = (b.label || '').toLowerCase();
+        } else {
+          av = a[f] ?? 0; bv = b[f] ?? 0;
+        }
+        if (av < bv) return sortBy.dir === 'asc' ? -1 : 1;
+        if (av > bv) return sortBy.dir === 'asc' ? 1 : -1;
+        return 0;
+      });
+
+      const totalGross = customers.reduce((s, c) => s + c.lifetimeGross, 0);
+      const totalRefunded = customers.reduce((s, c) => s + c.refunded, 0);
+      const totalNet = totalGross - totalRefunded;
+
+      const summary = `
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Customers</div>
+            <div class="text-2xl font-medium text-stone-900 tabular-nums font-mono">${customers.length}</div>
+            <div class="text-xs text-stone-500 mt-1">unique sources</div>
+          `, 'p-5')}
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Lifetime gross</div>
+            <div class="text-2xl font-medium text-stone-900 tabular-nums font-mono">${esc(fmt(totalGross, cur))}</div>
+            <div class="text-xs text-stone-500 mt-1">${esc(fmt(totalRefunded, cur))} refunded</div>
+          `, 'p-5')}
+          ${card(`
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Lifetime net</div>
+            <div class="text-2xl font-medium tabular-nums font-mono" style="color: var(--income);">${esc(fmt(totalNet, cur))}</div>
+            <div class="text-xs text-stone-500 mt-1">${customers.length ? esc(fmt(totalNet / customers.length, cur)) : '—'} avg</div>
+          `, 'p-5')}
+        </div>`;
+
+      const sortHeader = (field, label, align = 'left') => `
+        <th class="text-${align} font-medium px-4 md:px-6 py-4 cursor-pointer hover:text-stone-900 transition-colors whitespace-nowrap"
+            data-action="sort-customers" data-field="${field}">${esc(label)}${arrow(field)}</th>`;
+
+      const rows = customers.map(c => {
+        const refundsCell = c.refunded > 0
+          ? `<span style="color: var(--expense);">${esc(fmt(c.refunded, cur))}</span>`
+          : `<span class="text-stone-500">—</span>`;
+        return `<tr class="hover:bg-stone-50 transition-colors" style="border-bottom: 1px solid var(--border);">
+          <td class="px-4 md:px-6 py-3 text-stone-900">
+            <div class="truncate max-w-[260px]" title="${attr(c.label)}">${esc(c.label)}</div>
+          </td>
+          <td class="px-4 md:px-6 py-3 text-right tabular-nums font-medium font-mono">${esc(fmt(c.lifetimeGross, cur))}</td>
+          <td class="px-4 md:px-6 py-3 text-right tabular-nums font-mono hidden md:table-cell">${refundsCell}</td>
+          <td class="px-4 md:px-6 py-3 text-right tabular-nums font-medium font-mono" style="color: var(--income);">${esc(fmt(c.net, cur))}</td>
+          <td class="px-4 md:px-6 py-3 text-right tabular-nums text-xs text-stone-500 hidden md:table-cell">${c.count}</td>
+          <td class="px-4 md:px-6 py-3 text-stone-600 tabular-nums text-xs font-mono hidden lg:table-cell">${esc(c.firstPayment ? fmtDate(c.firstPayment) : '—')}</td>
+          <td class="px-4 md:px-6 py-3 text-stone-600 tabular-nums text-xs font-mono">${esc(c.lastPayment ? fmtDate(c.lastPayment) : '—')}</td>
+        </tr>`;
+      }).join('');
+
+      const table = customers.length === 0
+        ? `<div class="p-14 text-center text-stone-500 text-sm">No customers yet — log some income first.</div>`
+        : `<div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid var(--border);">
+                ${sortHeader('label', 'Customer')}
+                ${sortHeader('lifetimeGross', 'Lifetime gross', 'right')}
+                <th class="text-right font-medium px-4 md:px-6 py-4 hidden md:table-cell whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="refunded">Refunded${arrow('refunded')}</th>
+                ${sortHeader('net', 'Net', 'right')}
+                <th class="text-right font-medium px-4 md:px-6 py-4 hidden md:table-cell whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="count">Count${arrow('count')}</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 hidden lg:table-cell whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="firstPayment">First${arrow('firstPayment')}</th>
+                <th class="text-left font-medium px-4 md:px-6 py-4 whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="lastPayment">Last${arrow('lastPayment')}</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
+
+      return `
+        <div class="space-y-6">
+          <div>
+            <div class="text-[11px] tracking-[0.15em] uppercase text-stone-500 mb-2">Who's paid us what</div>
+            <h1 class="font-serif text-4xl font-light text-stone-900 leading-none">Customers</h1>
+            <p class="text-sm text-stone-500 mt-2">Income rolled up by source. Lifetime grain — not affected by the period selector. Click any column header to sort.</p>
+          </div>
+          ${summary}
+          ${card(table, 'overflow-hidden')}
+        </div>`;
+    }
+
+    function actSortCustomers(field) {
+      const cur = state.sortCustomers;
+      state.sortCustomers = cur.field === field
+        ? { field, dir: cur.dir === 'asc' ? 'desc' : 'asc' }
+        : { field, dir: field === 'label' ? 'asc' : 'desc' };
+      render();
+    }
 
     // ============ Ledger action handlers ============
     function actAddEntry(kind) {
@@ -3584,6 +4037,7 @@
       overview: viewOverview,
       expenses: viewExpenses,
       income: viewIncome,
+      customers: viewCustomers,
       uncollected: viewUncollected,
       loans: viewLoans,
       tax: viewTax,
@@ -3758,6 +4212,9 @@
       // Loans
       if (action === 'add-loan') return actAddLoan();
       if (action === 'delete-loan') return actDeleteLoan(el.dataset.id);
+
+      // Customers
+      if (action === 'sort-customers') return actSortCustomers(el.dataset.field);
 
       // Tax
       if (action === 'tax-csv-export') return actTaxCsvExport();
