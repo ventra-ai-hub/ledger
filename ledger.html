@@ -144,6 +144,14 @@
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     .pb-safe { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
 
+    /* Screen-reader-only — paired with each chart canvas so the data has an
+       accessible alternative for non-visual users. */
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+    .chart-wrap { position: relative; }
+
     /* ============ Tailwind-class overrides (dark repaint) ============
        The source was authored against Tailwind's `stone` scale for a warm
        light theme. We remap each colour class to our dark tokens so the
@@ -2146,6 +2154,7 @@
         </div>`;
 
       const concentration = isExpense ? vendorConcentrationBlock(filtered) : '';
+      const charts = isExpense ? expenseChartsBlock() : incomeChartsBlock();
 
       return `
         <div class="space-y-6">
@@ -2163,8 +2172,57 @@
           </div>
           ${addForm}
           ${filterRow}
+          ${charts}
           ${concentration}
           ${card(table, 'overflow-hidden')}
+        </div>`;
+    }
+
+    // Income tab — trend line above the table
+    function incomeChartsBlock() {
+      const h = isNarrowViewport() ? '240px' : '300px';
+      const monthsBack = state.period === 'month' ? 6 : 12;
+      return card(`
+        <div class="p-5">
+          <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Net income trend</div>
+          <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Last ${monthsBack} months</h2>
+          <div class="chart-wrap" style="height: ${h};">
+            <canvas data-chart="income-trend" id="ch-income-trend" data-sr-target="ch-income-trend-sr"
+              aria-label="Net monthly income" aria-describedby="ch-income-trend-sr"></canvas>
+            <div id="ch-income-trend-sr" data-sr></div>
+          </div>
+        </div>
+      `, 'overflow-hidden');
+    }
+
+    // Expenses tab — vendor donut + category stacked bars
+    function expenseChartsBlock() {
+      const h = isNarrowViewport() ? '240px' : '300px';
+      const periodWord = state.period === 'month' ? 'month' : state.period === 'quarter' ? 'quarter' : 'FY';
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          ${card(`
+            <div class="p-5">
+              <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Vendor concentration</div>
+              <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Top 5 vendors this ${periodWord}</h2>
+              <div class="chart-wrap" style="height: ${h};">
+                <canvas data-chart="vendor-donut" id="ch-vendor-donut" data-sr-target="ch-vendor-donut-sr"
+                  aria-label="Vendor expense concentration donut" aria-describedby="ch-vendor-donut-sr"></canvas>
+                <div id="ch-vendor-donut-sr" data-sr></div>
+              </div>
+            </div>
+          `, 'overflow-hidden')}
+          ${card(`
+            <div class="p-5">
+              <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Category breakdown</div>
+              <h2 class="font-serif text-lg font-light text-stone-900 mb-3">By month, top 5 categories</h2>
+              <div class="chart-wrap" style="height: ${h};">
+                <canvas data-chart="category-stacked" id="ch-cat-stack" data-sr-target="ch-cat-stack-sr"
+                  aria-label="Expenses by category and month" aria-describedby="ch-cat-stack-sr"></canvas>
+                <div id="ch-cat-stack-sr" data-sr></div>
+              </div>
+            </div>
+          `, 'overflow-hidden')}
         </div>`;
     }
 
@@ -2588,6 +2646,33 @@
           </table>
         </div>`;
 
+      const chartHeight = isNarrowViewport() ? '240px' : '300px';
+      const chartsRow = card(`
+        <div class="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Revenue concentration</div>
+            <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Top 5 customers + everyone else</h2>
+            <div class="chart-wrap" style="height: ${chartHeight};">
+              <canvas data-chart="customer-donut" id="ch-customer-donut"
+                aria-label="Customer revenue concentration donut" aria-describedby="ch-customer-donut-sr"></canvas>
+              <div id="ch-customer-donut-sr" data-sr></div>
+            </div>
+          </div>
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Net income trend</div>
+            <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Last ${state.period === 'month' ? 6 : 12} months</h2>
+            <div class="chart-wrap" style="height: ${chartHeight};">
+              <canvas data-chart="income-trend" id="ch-customer-trend" data-sr-target="ch-customer-trend-sr"
+                aria-label="Net income over recent months" aria-describedby="ch-customer-trend-sr"></canvas>
+              <div id="ch-customer-trend-sr" data-sr></div>
+            </div>
+          </div>
+        </div>
+      `, 'overflow-hidden');
+
+      // Apply data-sr-target to donut canvas dynamically via attribute (above)
+      const chartsHTML = chartsRow.replace('id="ch-customer-donut"', 'id="ch-customer-donut" data-sr-target="ch-customer-donut-sr"');
+
       return `
         <div class="space-y-6">
           <div>
@@ -2596,6 +2681,7 @@
             <p class="text-sm text-stone-500 mt-2">Income rolled up by source. Lifetime grain — not affected by the period selector. Click any column header to sort.</p>
           </div>
           ${summary}
+          ${chartsHTML}
           ${card(table, 'overflow-hidden')}
         </div>`;
     }
@@ -3138,6 +3224,17 @@
             ${partnerSplit}
             ${gstCard}
           </div>
+          ${card(`
+            <div class="p-5 pb-0">
+              <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Category breakdown</div>
+              <h2 class="font-serif text-xl font-light text-stone-900">FY${targetFY} expenses by month and category</h2>
+            </div>
+            <div class="p-5 chart-wrap" style="height: ${isNarrowViewport() ? '300px' : '340px'};">
+              <canvas data-chart="category-stacked" id="ch-tax-stack" data-sr-target="ch-tax-stack-sr" data-scope="tax-fy"
+                aria-label="FY expenses by category and month" aria-describedby="ch-tax-stack-sr"></canvas>
+              <div id="ch-tax-stack-sr" data-sr></div>
+            </div>
+          `)}
           ${card(`
             <div class="p-5 pb-0">
               <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Expenses by category</div>
@@ -4206,7 +4303,313 @@
     // after each render() we destroy the previous Chart instances and walk the
     // DOM to instantiate fresh ones from the CHART_BUILDERS registry. Keeps the
     // existing full-re-render model honest without leaking GPU contexts.
-    const CHART_BUILDERS = {};   // populated in commit 2
+    // Helpers to derive labelled monthly buckets and concentrations without
+    // recomputing the same array shapes inline in every builder.
+    function isNarrowViewport() {
+      return window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
+    }
+    function chartAnchorEndISO() {
+      if (state.period === 'month') {
+        const [y, m] = state.currentMonth.split('-').map(Number);
+        const last = new Date(y, m, 0);   // day 0 of next month = last day of this month
+        return last.toISOString().slice(0, 10);
+      }
+      if (state.period === 'quarter') return quarterRange(state.currentQuarter).end;
+      // FY ends 30 June of the FY year
+      return `${state.currentFY}-06-30`;
+    }
+    // Trailing N months ending at the period's anchor month. Returns
+    // [{ key: 'YYYY-MM', label: 'Aug', value: <net income> }, …]
+    function trailingMonthlyNetIncome(monthsBack) {
+      const anchor = chartAnchorEndISO();
+      const [y, m] = anchor.slice(0, 7).split('-').map(Number);
+      const out = [];
+      for (let i = monthsBack - 1; i >= 0; i--) {
+        const d = new Date(y, m - 1 - i, 1);
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+        let net = 0;
+        for (const x of state.data.income) if (monthKey(x.date) === key) net += parseAmount(x.amount);
+        out.push({ key, label: MONTHS_SHORT[d.getMonth()], year: d.getFullYear(), value: net });
+      }
+      return out;
+    }
+    // Top N + "Everyone else" bucket; preserves source ordering for the rest.
+    function topNWithRest(items, valueKey, n = 5) {
+      const sorted = [...items].sort((a, b) => (b[valueKey] || 0) - (a[valueKey] || 0));
+      const top = sorted.slice(0, n);
+      const rest = sorted.slice(n);
+      const restSum = rest.reduce((s, x) => s + (x[valueKey] || 0), 0);
+      return { top, rest, restSum };
+    }
+    // sr-only summary table HTML — appended next to every chart canvas.
+    function srSummaryTable(id, caption, columns, rows) {
+      return `<table id="${attr(id)}" class="sr-only">
+        <caption>${esc(caption)}</caption>
+        <thead><tr>${columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table>`;
+    }
+
+    const CHART_SURFACE_BORDER = '#1d1f23'; // var(--surface) for slice gaps
+
+    const CHART_BUILDERS = {
+
+      // 1. Customer concentration donut — top 5 customers by lifetime net
+      //    plus "Everyone else". Lifetime grain (Customer tab is lifetime).
+      'customer-donut': (canvas) => {
+        const cur = state.data.settings.currency;
+        const all = aggregateCustomers(state.data.income).filter(c => c.count >= 1 && c.net > 0);
+        if (!all.length) return null;
+        const { top, restSum } = topNWithRest(all, 'net', 5);
+        const labels = [...top.map(c => c.label), ...(restSum > 0 ? ['Everyone else'] : [])];
+        const data   = [...top.map(c => c.net),   ...(restSum > 0 ? [restSum] : [])];
+        const colors = labels.map((_, i) => CHART_PALETTE[Math.min(i, 5)]);
+        const total  = data.reduce((a, b) => a + b, 0);
+        // sr-only summary
+        const srHost = document.getElementById(canvas.dataset.srTarget);
+        if (srHost) {
+          srHost.innerHTML = srSummaryTable(canvas.id + '-tbl',
+            'Customer revenue concentration: top 5 customers and Everyone else',
+            ['Customer', 'Lifetime net', '% of revenue'],
+            data.map((v, i) => [labels[i], fmt(v, cur), `${((v / total) * 100).toFixed(1)}%`])
+          );
+        }
+        return {
+          type: 'doughnut',
+          data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: CHART_SURFACE_BORDER, borderWidth: 2, hoverOffset: 6 }] },
+          options: {
+            responsive: true, maintainAspectRatio: false, cutout: '62%',
+            plugins: {
+              legend: { position: isNarrowViewport() ? 'bottom' : 'right', labels: { boxWidth: 10, boxHeight: 10, padding: 10 } },
+              tooltip: { callbacks: {
+                label: (ctx) => {
+                  const v = ctx.parsed; const pct = total > 0 ? (v / total) * 100 : 0;
+                  return ` ${ctx.label}: ${fmt(v, cur)} (${pct.toFixed(1)}%)`;
+                }
+              }}
+            }
+          }
+        };
+      },
+
+      // 2. Income trend line — net monthly income over the last N months
+      //    anchored at the period's end. Same builder used on Customer + Income.
+      'income-trend': (canvas) => {
+        const cur = state.data.settings.currency;
+        const monthsBack = state.period === 'fy' ? 12 : (state.period === 'quarter' ? 12 : 6);
+        const buckets = trailingMonthlyNetIncome(monthsBack);
+        const labels = buckets.map(b => b.label);
+        const data = buckets.map(b => b.value);
+        const srHost = document.getElementById(canvas.dataset.srTarget);
+        if (srHost) {
+          srHost.innerHTML = srSummaryTable(canvas.id + '-tbl',
+            `Net income — last ${monthsBack} months`,
+            ['Month', 'Net income'],
+            buckets.map(b => [`${b.label} ${b.year}`, fmt(b.value, cur)])
+          );
+        }
+        return {
+          type: 'line',
+          data: { labels, datasets: [{
+            label: 'Net income',
+            data,
+            borderColor: '#a3c9a3',                       // sage
+            backgroundColor: 'rgba(163, 201, 163, 0.18)',
+            fill: true,
+            tension: 0.32,
+            pointRadius: 4, pointHoverRadius: 6,
+            pointBackgroundColor: '#a3c9a3', pointBorderColor: CHART_SURFACE_BORDER, pointBorderWidth: 2,
+            borderWidth: 2,
+          }]},
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { label: (ctx) => ` ${fmt(ctx.parsed.y, cur)}` } }
+            },
+            scales: {
+              x: { grid: { display: false }, ticks: { color: '#6b6a68' } },
+              y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#6b6a68', callback: (v) => fmt(v, cur).replace(/\.00$/, '') } }
+            }
+          }
+        };
+      },
+
+      // 3. Vendor concentration donut — top 5 vendors in active period.
+      'vendor-donut': (canvas) => {
+        const cur = state.data.settings.currency;
+        const inP = (iso) => {
+          if (state.period === 'month')   return monthKey(iso) === state.currentMonth;
+          if (state.period === 'quarter') return isoInQuarter(iso, state.currentQuarter);
+          return isoInFY(iso, state.currentFY);
+        };
+        const m = new Map();
+        for (const e of state.data.expenses) {
+          if (!inP(e.date)) continue;
+          const key = (e.vendor || '').trim().toLowerCase();
+          if (!key) continue;
+          const cur = m.get(key) || { label: e.vendor.trim(), total: 0, latest: '' };
+          cur.total += parseAmount(e.amount);
+          if (!cur.latest || (e.date || '') >= cur.latest) { cur.label = e.vendor.trim(); cur.latest = e.date || ''; }
+          m.set(key, cur);
+        }
+        const all = [...m.values()];
+        if (!all.length) return null;
+        const { top, restSum } = topNWithRest(all, 'total', 5);
+        const labels = [...top.map(v => v.label), ...(restSum > 0 ? ['Everyone else'] : [])];
+        const data   = [...top.map(v => v.total),  ...(restSum > 0 ? [restSum] : [])];
+        const colors = labels.map((_, i) => CHART_PALETTE[Math.min(i, 5)]);
+        const total  = data.reduce((a, b) => a + b, 0);
+        const srHost = document.getElementById(canvas.dataset.srTarget);
+        if (srHost) {
+          srHost.innerHTML = srSummaryTable(canvas.id + '-tbl',
+            `Vendor concentration this ${state.period}: top 5 plus Everyone else`,
+            ['Vendor', 'Total', '% of expenses'],
+            data.map((v, i) => [labels[i], fmt(v, cur), `${((v / total) * 100).toFixed(1)}%`])
+          );
+        }
+        return {
+          type: 'doughnut',
+          data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: CHART_SURFACE_BORDER, borderWidth: 2, hoverOffset: 6 }] },
+          options: {
+            responsive: true, maintainAspectRatio: false, cutout: '62%',
+            plugins: {
+              legend: { position: isNarrowViewport() ? 'bottom' : 'right', labels: { boxWidth: 10, boxHeight: 10, padding: 10 } },
+              tooltip: { callbacks: { label: (ctx) => {
+                const v = ctx.parsed; const pct = total > 0 ? (v / total) * 100 : 0;
+                return ` ${ctx.label}: ${fmt(v, cur)} (${pct.toFixed(1)}%)`;
+              }}}
+            }
+          }
+        };
+      },
+
+      // 4. Category stacked bars — months × category breakdown across the
+      //    active period. Horizontal on desktop (long category names fit
+      //    along the y-axis), vertical on mobile.
+      'category-stacked': (canvas) => {
+        const cur = state.data.settings.currency;
+        // Scope: data-scope="tax-fy" forces FY-of-active-period (used on the
+        // Tax tab so the stacked bars match the FY summary regardless of
+        // whichever period the user last picked elsewhere).
+        const scope = canvas.dataset.scope || 'period';
+        // Determine month list & total set of categories for the active period.
+        let monthKeys = [];
+        if (scope === 'tax-fy') {
+          const fy = taxActiveFY();
+          for (let i = 0; i < 12; i++) {
+            const month = (6 + i) % 12;
+            const year = i < 6 ? fy - 1 : fy;
+            monthKeys.push(`${year}-${String(month+1).padStart(2,'0')}`);
+          }
+        } else if (state.period === 'month') {
+          // Just the single month — show 6-month context for trend visibility.
+          const anchor = state.currentMonth;
+          const [y, m] = anchor.split('-').map(Number);
+          for (let i = 5; i >= 0; i--) {
+            const d = new Date(y, m - 1 - i, 1);
+            monthKeys.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+          }
+        } else if (state.period === 'quarter') {
+          const r = quarterRange(state.currentQuarter);
+          const [sy, sm] = r.start.split('-').map(Number);
+          for (let k = 0; k < 3; k++) {
+            const d = new Date(sy, sm - 1 + k, 1);
+            monthKeys.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+          }
+        } else {
+          const fy = state.currentFY;
+          for (let i = 0; i < 12; i++) {
+            const month = (6 + i) % 12;
+            const year = i < 6 ? fy - 1 : fy;
+            monthKeys.push(`${year}-${String(month+1).padStart(2,'0')}`);
+          }
+        }
+        const monthSet = new Set(monthKeys);
+        const inMonth = (iso) => monthSet.has(monthKey(iso));
+
+        // Per-category totals across the period for ranking
+        const catTotals = new Map();
+        for (const e of state.data.expenses) {
+          if (!inMonth(e.date)) continue;
+          const c = e.category || 'Uncategorised';
+          catTotals.set(c, (catTotals.get(c) || 0) + parseAmount(e.amount));
+        }
+        if (!catTotals.size) return null;
+        const sortedCats = [...catTotals.entries()].sort((a, b) => b[1] - a[1]);
+        const topCats = sortedCats.slice(0, 5).map(([k]) => k);
+        const restCats = new Set(sortedCats.slice(5).map(([k]) => k));
+        const datasetCategories = [...topCats, ...(restCats.size ? ['Everyone else'] : [])];
+
+        // Build per-month per-category sums
+        const matrix = monthKeys.map(mk => {
+          const row = Object.fromEntries(datasetCategories.map(c => [c, 0]));
+          for (const e of state.data.expenses) {
+            if (monthKey(e.date) !== mk) continue;
+            const c = e.category || 'Uncategorised';
+            const bucket = topCats.includes(c) ? c : (restCats.has(c) ? 'Everyone else' : null);
+            if (bucket) row[bucket] += parseAmount(e.amount);
+          }
+          return row;
+        });
+
+        const labels = monthKeys.map(k => {
+          const [, mo] = k.split('-');
+          return MONTHS_SHORT[Number(mo) - 1];
+        });
+        const datasets = datasetCategories.map((cat, i) => ({
+          label: cat,
+          data: matrix.map(r => r[cat]),
+          backgroundColor: CHART_PALETTE[Math.min(i, 5)],
+          borderColor: CHART_SURFACE_BORDER,
+          borderWidth: 1,
+          borderRadius: 4,
+        }));
+
+        const srHost = document.getElementById(canvas.dataset.srTarget);
+        if (srHost) {
+          const totalsRow = datasetCategories.map((c) =>
+            matrix.reduce((s, r) => s + r[c], 0)
+          );
+          srHost.innerHTML = srSummaryTable(canvas.id + '-tbl',
+            `Expenses by category — ${monthKeys.length} months`,
+            ['Month', ...datasetCategories],
+            [
+              ...monthKeys.map((mk, i) => {
+                const [, mo] = mk.split('-');
+                return [`${MONTHS_SHORT[Number(mo)-1]} ${mk.slice(0,4)}`, ...datasetCategories.map(c => fmt(matrix[i][c], cur))];
+              }),
+              ['Total', ...totalsRow.map(v => fmt(v, cur))],
+            ]
+          );
+        }
+
+        const horizontal = !isNarrowViewport();
+        return {
+          type: 'bar',
+          data: { labels, datasets },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            indexAxis: horizontal ? 'y' : 'x',
+            plugins: {
+              legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, padding: 8 } },
+              tooltip: { callbacks: {
+                label: (ctx) => ` ${ctx.dataset.label}: ${fmt(ctx.parsed[horizontal ? 'x' : 'y'], cur)}`,
+                footer: (items) => {
+                  const sum = items.reduce((s, it) => s + it.parsed[horizontal ? 'x' : 'y'], 0);
+                  return `Total: ${fmt(sum, cur)}`;
+                }
+              }}
+            },
+            scales: {
+              x: { stacked: true, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#6b6a68', callback: (v) => horizontal ? fmt(v, cur).replace(/\.00$/, '') : v } },
+              y: { stacked: true, grid: { display: false }, ticks: { color: '#6b6a68', callback: (v, idx) => horizontal ? labels[idx] : fmt(v, cur).replace(/\.00$/, '') } }
+            }
+          }
+        };
+      }
+
+    };
     const _charts = new Map();
     function destroyAllCharts() {
       for (const c of _charts.values()) { try { c.destroy(); } catch {} }
