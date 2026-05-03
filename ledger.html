@@ -276,6 +276,9 @@
       uncollected: [],
       loans: [],
       settings: { ...defaultSettings },
+      // Per-customer friendly display names. Synced. Keyed by source/email
+      // lowercased. Empty value = fall back to the original source string.
+      customerNames: {},
       dataModifiedAt: null
     };
 
@@ -537,6 +540,10 @@
       };
       // Lock 50/50 — ignore any stored split values.
       out.settings.splitA = 50;
+      // Display names map — coerce to a plain object so older blobs without
+      // the field don't break helpers that look it up.
+      out.customerNames = (data.customerNames && typeof data.customerNames === 'object' && !Array.isArray(data.customerNames))
+        ? data.customerNames : {};
       out.settings.splitB = 50;
       out.expenses = (out.expenses || []).map(e => ({
         id: e.id || uid(),
@@ -639,7 +646,8 @@
       filterIncome: 'all',
       sortExpense: { field: 'date', dir: 'desc' },
       sortIncome: { field: 'date', dir: 'desc' },
-      sortCustomers: { field: 'net', dir: 'desc' }
+      sortCustomers: { field: 'net', dir: 'desc' },
+      editingCustomerKey: null    // lowercased customer key currently being renamed
     };
 
     // Stamp an entry with editedBy + editedAt (from current userName, if set)
@@ -2394,8 +2402,12 @@
         </tr>`;
       }
 
+      // For income rows, surface the friendly customer display name in a hover
+      // tooltip. Keep the email/source visible — more identifying for accountancy.
+      const display = (M.isExpense || !item[nameField]) ? '' : customerDisplayName(item[nameField]);
+      const titleAttr = display ? ` title="${attr(display)}"` : '';
       return `<tr class="group hover:bg-stone-50 transition-colors" style="border-bottom: 1px solid var(--border);">
-        <td class="px-4 md:px-6 py-4 text-stone-900">
+        <td class="px-4 md:px-6 py-4 text-stone-900"${titleAttr}>
           <div>${esc(item[nameField] || '')}</div>
           ${editedStamp}
         </td>
@@ -2423,6 +2435,28 @@
     // case-insensitively (so "Joe@x.com" and "joe@x.com" land in the same
     // bucket). No status pills, no churn judgement — Dan's December soft
     // reset means refund rows are operational, not churn signal.
+    // Customer display names. Synced via state.data.customerNames.
+    // Empty / missing override → fall back to the original source string.
+    const customerKey = (source) => (source || '').trim().toLowerCase();
+    function customerDisplayName(source) {
+      const k = customerKey(source);
+      return (state.data.customerNames && state.data.customerNames[k]) || '';
+    }
+    function customerDisplayLabel(source) {
+      return customerDisplayName(source) || (source || '').trim();
+    }
+    function setCustomerName(source, name) {
+      const k = customerKey(source);
+      if (!k) return;
+      const trimmed = (name || '').trim();
+      setData(d => {
+        const next = { ...d, customerNames: { ...(d.customerNames || {}) } };
+        if (trimmed) next.customerNames[k] = trimmed;
+        else delete next.customerNames[k];
+        return next;
+      });
+    }
+
     function aggregateCustomers(income) {
       const map = new Map();
       for (const i of income) {
@@ -2454,7 +2488,14 @@
         }
         c.net = c.lifetimeGross - c.refunded;
       }
-      return [...map.values()];
+      // Attach friendly display name (or fall back to source) so consumers
+      // (table, donut, tiles, what-changed feed) can use a single field.
+      const out = [...map.values()];
+      for (const c of out) {
+        c.displayName  = (state.data.customerNames && state.data.customerNames[c.key]) || '';
+        c.displayLabel = c.displayName || c.label;
+      }
+      return out;
     }
 
     // Compute the six headline stats. Universe = customers with at least one
@@ -2517,7 +2558,7 @@
 
       const biggestTile = tile(
         'Biggest spender',
-        s.biggest ? `<div class="truncate" title="${attr(s.biggest.label)}">${esc(s.biggest.label)}</div>` : '<span class="text-stone-500">—</span>',
+        s.biggest ? `<div class="truncate" title="${attr(s.biggest.label)}">${esc(s.biggest.displayLabel || s.biggest.label)}</div>` : '<span class="text-stone-500">—</span>',
         s.biggest
           ? `${esc(fmt(s.biggest.net, cur))} · ${s.biggestShare.toFixed(1)}% of revenue`
           : 'no positive payments yet',
@@ -2626,10 +2667,34 @@
         const refundsCell = c.refunded > 0
           ? `<span style="color: var(--expense);">${esc(fmt(c.refunded, cur))}</span>`
           : `<span class="text-stone-500">—</span>`;
+
+        const editing = state.editingCustomerKey === c.key;
+        const nameCell = editing ? `
+          <div data-customer-edit-row="${attr(c.key)}" class="flex items-center gap-2">
+            <input type="text" data-field="customerName" value="${attr(c.displayName || '')}" autofocus
+              placeholder="${attr(c.label)}"
+              class="flex-1 min-w-0 px-3 py-1.5 text-sm rounded-xl bg-white" style="${shadowField}" />
+            <button data-action="save-customer-name" data-key="${attr(c.key)}"
+              class="px-2 py-1.5 rounded-xl text-xs" style="background-color: var(--accent); color: var(--bg);">Save</button>
+            ${c.displayName ? `<button data-action="clear-customer-name" data-key="${attr(c.key)}"
+              class="px-2 py-1.5 rounded-xl text-xs" style="background-color: var(--surface-2); color: var(--text-muted);">Clear</button>` : ''}
+            <button data-action="cancel-edit-customer"
+              class="px-2 py-1.5 rounded-xl text-xs" style="background-color: var(--surface-2); color: var(--text-muted);">Cancel</button>
+          </div>
+        ` : `
+          <div class="group/row flex items-start gap-2">
+            <div class="flex-1 min-w-0">
+              <div class="truncate max-w-[260px] text-stone-900" title="${attr(c.label)}">${esc(c.displayLabel || c.label)}</div>
+              ${c.displayName ? `<div class="truncate max-w-[260px] text-[11px] text-stone-500" title="${attr(c.label)}">${esc(c.label)}</div>` : ''}
+            </div>
+            <button data-action="start-edit-customer" data-key="${attr(c.key)}"
+              title="Set a friendly name for this customer"
+              class="p-1.5 rounded-lg text-stone-500 hover:text-stone-900 transition-colors flex-shrink-0"
+              style="background-color: transparent;">${icon('pencil', 13)}</button>
+          </div>
+        `;
         return `<tr class="hover:bg-stone-50 transition-colors" style="border-bottom: 1px solid var(--border);">
-          <td class="px-4 md:px-6 py-3 text-stone-900">
-            <div class="truncate max-w-[260px]" title="${attr(c.label)}">${esc(c.label)}</div>
-          </td>
+          <td class="px-4 md:px-6 py-3 text-stone-900">${nameCell}</td>
           <td class="px-4 md:px-6 py-3 text-right tabular-nums font-medium font-mono">${esc(fmt(c.lifetimeGross, cur))}</td>
           <td class="px-4 md:px-6 py-3 text-right tabular-nums font-mono hidden md:table-cell">${refundsCell}</td>
           <td class="px-4 md:px-6 py-3 text-right tabular-nums font-medium font-mono" style="color: var(--income);">${esc(fmt(c.net, cur))}</td>
@@ -2776,8 +2841,8 @@
         headers = ['Vendor', 'Category', 'Date', 'Amount', 'GST Inclusive', 'Notes', 'Edited By', 'Edited At'];
         rows = filtered.map(x => [x.vendor, x.category || '', x.date, parseAmount(x.amount).toFixed(2), x.gstInclusive ? 'yes' : '', x.notes || '', x.editedBy || '', x.editedAt || '']);
       } else {
-        headers = ['Source', 'Date', 'Amount', 'Notes', 'Edited By', 'Edited At'];
-        rows = filtered.map(x => [x.source, x.date, parseAmount(x.amount).toFixed(2), x.notes || '', x.editedBy || '', x.editedAt || '']);
+        headers = ['Source', 'Display Name', 'Date', 'Amount', 'Notes', 'Edited By', 'Edited At'];
+        rows = filtered.map(x => [x.source, customerDisplayName(x.source), x.date, parseAmount(x.amount).toFixed(2), x.notes || '', x.editedBy || '', x.editedAt || '']);
       }
       const suffix = filter === 'all' ? 'all' : filter;
       download(`ventra-${M.listKey}-${suffix}.csv`, toCSV(rows, headers), 'text/csv');
@@ -3623,17 +3688,22 @@
       pdfSectionTitle(ctx, 'Income — all entries');
       {
         const columns = [
-          { key: 'date',   header: 'Date',   x: margin,               align: 'left'  },
-          { key: 'source', header: 'Source', x: margin + 80,          align: 'left'  },
-          { key: 'notes',  header: 'Notes',  x: margin + 240,         align: 'left'  },
-          { key: 'amount', header: 'Amount', x: pageW - margin,       align: 'right', mono: true },
+          { key: 'date',   header: 'Date',     x: margin,               align: 'left'  },
+          { key: 'name',   header: 'Customer', x: margin + 80,          align: 'left'  },
+          { key: 'source', header: 'Source',   x: margin + 240,         align: 'left'  },
+          { key: 'notes',  header: 'Notes',    x: margin + 380,         align: 'left'  },
+          { key: 'amount', header: 'Amount',   x: pageW - margin,       align: 'right', mono: true },
         ];
-        const rows = [...fyIncome].sort(byDate).map(i => ({
-          date: fmtDate(i.date),
-          source: i.source || '',
-          notes: i.notes || '',
-          amount: pdfMoney(parseAmount(i.amount), cur),
-        }));
+        const rows = [...fyIncome].sort(byDate).map(i => {
+          const display = customerDisplayName(i.source);
+          return {
+            date: fmtDate(i.date),
+            name: display || i.source || '',
+            source: display ? (i.source || '') : '',
+            notes: i.notes || '',
+            amount: pdfMoney(parseAmount(i.amount), cur),
+          };
+        });
         pdfTable(ctx, columns, rows, {
           totalRow: { date: 'Total', amount: pdfMoney(totalIncome, cur) },
         });
@@ -3772,8 +3842,8 @@
 
         // 01 — Income CSV
         zip.file('01-income.csv', toCSVWithBOM(
-          fyIncome.map(i => [i.source || '', i.date, parseAmount(i.amount).toFixed(2), i.notes || '', i.editedBy || '', i.editedAt || '']),
-          ['Source', 'Date', 'Amount', 'Notes', 'Edited by', 'Edited at']
+          fyIncome.map(i => [i.source || '', customerDisplayName(i.source), i.date, parseAmount(i.amount).toFixed(2), i.notes || '', i.editedBy || '', i.editedAt || '']),
+          ['Source', 'Display Name', 'Date', 'Amount', 'Notes', 'Edited by', 'Edited at']
         ));
 
         // 02 — Expenses all
@@ -4390,8 +4460,8 @@
         const all = aggregateCustomers(state.data.income).filter(c => c.count >= 1 && c.net > 0);
         if (!all.length) return null;
         const { top, restSum } = topNWithRest(all, 'net', 5);
-        const labels = [...top.map(c => c.label), ...(restSum > 0 ? ['Everyone else'] : [])];
-        const data   = [...top.map(c => c.net),   ...(restSum > 0 ? [restSum] : [])];
+        const labels = [...top.map(c => c.displayLabel || c.label), ...(restSum > 0 ? ['Everyone else'] : [])];
+        const data   = [...top.map(c => c.net),                       ...(restSum > 0 ? [restSum] : [])];
         const colors = labels.map((_, i) => CHART_PALETTE[Math.min(i, 5)]);
         const total  = data.reduce((a, b) => a + b, 0);
         // sr-only summary
@@ -4871,6 +4941,30 @@
 
       // Customers
       if (action === 'sort-customers') return actSortCustomers(el.dataset.field);
+      if (action === 'start-edit-customer') {
+        state.editingCustomerKey = el.dataset.key;
+        return render();
+      }
+      if (action === 'cancel-edit-customer') {
+        state.editingCustomerKey = null;
+        return render();
+      }
+      if (action === 'save-customer-name') {
+        const key = el.dataset.key;
+        const row = document.querySelector(`[data-customer-edit-row="${CSS.escape(key)}"]`);
+        const input = row && row.querySelector('[data-field="customerName"]');
+        const name = input ? input.value : '';
+        state.editingCustomerKey = null;
+        // setCustomerName triggers setData → render. No additional render call needed.
+        if (name.trim()) setCustomerName(key, name);
+        else { setCustomerName(key, ''); }   // empty input clears the override
+        return;
+      }
+      if (action === 'clear-customer-name') {
+        state.editingCustomerKey = null;
+        setCustomerName(el.dataset.key, '');
+        return;
+      }
 
       // Tax
       if (action === 'tax-csv-export') return actTaxCsvExport();
@@ -5009,6 +5103,17 @@
     // Enter-to-submit in add forms (feels more like the React original)
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
+      // Customer-name inline edit input — Enter saves the value.
+      const editRow = e.target.closest && e.target.closest('[data-customer-edit-row]');
+      if (editRow) {
+        e.preventDefault();
+        const key = editRow.dataset.customerEditRow;
+        const input = editRow.querySelector('[data-field="customerName"]');
+        const name = input ? input.value : '';
+        state.editingCustomerKey = null;
+        setCustomerName(key, name.trim());  // setData → render
+        return;
+      }
       const form = e.target.closest && e.target.closest('[data-add-form]');
       if (!form) return;
       // Don't submit on Enter inside a <select> or textarea
