@@ -10,6 +10,7 @@
   <link rel="icon" type="image/svg+xml" href="./icon.svg" />
   <link rel="apple-touch-icon" href="./icon-180.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Ledger" />
 
@@ -4377,7 +4378,16 @@
       C.defaults.font.size = 12;
       C.defaults.color = '#9c9a97'; // text-muted
       C.defaults.borderColor = 'rgba(255,255,255,0.06)';
-      C.defaults.animation = REDUCED_MOTION ? false : { duration: 480 };
+      // Animations disabled across the dashboard. Chart.js's animator runs
+      // inside requestAnimationFrame and ticks the active animations Map by
+      // calling each animation's _fn — if a chart is destroyed mid-tick (e.g.
+      // a tab switch or period change re-renders the chart), the animation
+      // entry can outlive its owner and crash with `this._fn is not a function`
+      // on the next frame. Real Safari hits this; Chromium tolerates it.
+      // Donuts, lines, and stacked bars on a re-rendering dashboard don't
+      // benefit from the animation anyway. REDUCED_MOTION kept as a
+      // documentation-only constant in case we ever revisit this.
+      C.defaults.animation = false;
       C.defaults.plugins.legend.labels.color = '#9c9a97';
       C.defaults.plugins.legend.labels.boxWidth = 10;
       C.defaults.plugins.legend.labels.boxHeight = 10;
@@ -4478,6 +4488,7 @@
           data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: CHART_SURFACE_BORDER, borderWidth: 2, hoverOffset: 6 }] },
           options: {
             responsive: true, maintainAspectRatio: false, cutout: '62%',
+            animation: false,                 // see Chart.defaults.animation above
             plugins: {
               legend: { position: isNarrowViewport() ? 'bottom' : 'right', labels: { boxWidth: 10, boxHeight: 10, padding: 10 } },
               tooltip: { callbacks: {
@@ -4522,6 +4533,7 @@
           }]},
           options: {
             responsive: true, maintainAspectRatio: false,
+            animation: false,                 // see Chart.defaults.animation above
             plugins: {
               legend: { display: false },
               tooltip: { callbacks: { label: (ctx) => ` ${fmt(ctx.parsed.y, cur)}` } }
@@ -4572,6 +4584,7 @@
           data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: CHART_SURFACE_BORDER, borderWidth: 2, hoverOffset: 6 }] },
           options: {
             responsive: true, maintainAspectRatio: false, cutout: '62%',
+            animation: false,                 // see Chart.defaults.animation above
             plugins: {
               legend: { position: isNarrowViewport() ? 'bottom' : 'right', labels: { boxWidth: 10, boxHeight: 10, padding: 10 } },
               tooltip: { callbacks: { label: (ctx) => {
@@ -4689,6 +4702,7 @@
           data: { labels, datasets },
           options: {
             responsive: true, maintainAspectRatio: false,
+            animation: false,                 // see Chart.defaults.animation above
             indexAxis: horizontal ? 'y' : 'x',
             plugins: {
               legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, padding: 8 } },
@@ -4714,7 +4728,14 @@
     // app re-renders and a new <canvas> takes over the same id slot.
     const _charts = new Map();
     function destroyAllCharts() {
-      for (const c of _charts.values()) { try { c.destroy(); } catch {} }
+      for (const c of _charts.values()) {
+        // Stop any in-flight animations FIRST so the global animator can't tick
+        // an animation entry whose chart is about to be destroyed.
+        // (animation: false on every builder makes this defensive in practice
+        // — keep both belts on.)
+        try { c.stop(); } catch {}
+        try { c.destroy(); } catch {}
+      }
       _charts.clear();
     }
     function initCharts() {
@@ -4729,7 +4750,10 @@
         // this Chart.js v4 throws "Canvas is already in use" on the next
         // construction and the canvas stays blank.
         const orphan = Chart.getChart(canvas);
-        if (orphan) { try { orphan.destroy(); } catch {} }
+        if (orphan) {
+          try { orphan.stop(); } catch {}    // halt animator entry first
+          try { orphan.destroy(); } catch {}
+        }
         const cfg = builder(canvas);
         if (!cfg) return;
         try {
