@@ -4729,10 +4729,6 @@
     const _charts = new Map();
     function destroyAllCharts() {
       for (const c of _charts.values()) {
-        // Stop any in-flight animations FIRST so the global animator can't tick
-        // an animation entry whose chart is about to be destroyed.
-        // (animation: false on every builder makes this defensive in practice
-        // — keep both belts on.)
         try { c.stop(); } catch {}
         try { c.destroy(); } catch {}
       }
@@ -4745,13 +4741,10 @@
         const builder = CHART_BUILDERS[key];
         if (!builder) return;
         // Defensive: if Chart.js's internal registry still thinks something
-        // owns this canvas (e.g. an earlier .destroy() threw silently and was
-        // swallowed), tear it down before constructing a new one. Without
-        // this Chart.js v4 throws "Canvas is already in use" on the next
-        // construction and the canvas stays blank.
+        // owns this canvas, tear it down before constructing a new one.
         const orphan = Chart.getChart(canvas);
         if (orphan) {
-          try { orphan.stop(); } catch {}    // halt animator entry first
+          try { orphan.stop(); } catch {}
           try { orphan.destroy(); } catch {}
         }
         const cfg = builder(canvas);
@@ -4762,18 +4755,6 @@
         } catch (err) {
           console.warn('[chart] init failed for', key, err);
         }
-      });
-    }
-    // Single-pending init token. If render() fires multiple times before the
-    // next animation frame (e.g. user clicks Period mode quickly), only one
-    // initCharts pass runs, and it sees the latest DOM state.
-    let _chartInitPending = false;
-    function scheduleChartInit() {
-      if (_chartInitPending) return;
-      _chartInitPending = true;
-      requestAnimationFrame(() => {
-        _chartInitPending = false;
-        initCharts();
       });
     }
     // Re-flow chart sizes on viewport resize without destroying instances.
@@ -4789,14 +4770,20 @@
     const root = document.getElementById('root');
 
     function render() {
-      destroyAllCharts();              // free old chart instances before innerHTML wipe
+      destroyAllCharts();
       const renderer = VIEW_RENDERERS[state.tab] || viewOverview;
       root.innerHTML = layout(renderer());
       if (typeof paintSyncIndicator === 'function') paintSyncIndicator();
-      // rAF defers init until layout has actually committed. Microtask used to
-      // run before paint and Chart.js's responsive sizing could measure stale
-      // container dimensions on subsequent renders. rAF fires after layout.
-      scheduleChartInit();
+      // Init charts synchronously — Stage 5.1 deferred this through rAF +
+      // a single-pending dedupe to "let layout flush", but Chart.js with
+      // responsive:true uses its own ResizeObserver to react to layout, so
+      // the rAF buffer was unnecessary. The dedupe was the only async piece
+      // in the lifecycle and the most plausible source of skipped re-inits
+      // in real Chrome (works in headless because rAF timing is more
+      // predictable there). Sync init makes "every render() instantiates
+      // every canvas's chart" a hard guarantee with no scheduling state to
+      // get stuck.
+      initCharts();
     }
 
     // ============ Dropdown open/close (DOM-driven) ============
