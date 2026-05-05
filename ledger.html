@@ -4723,46 +4723,105 @@
       }
 
     };
-    // Track instances keyed by the canvas ELEMENT (not by canvas.id). Using
-    // the element itself as the key sidesteps any id-reuse confusion when the
-    // app re-renders and a new <canvas> takes over the same id slot.
-    const _charts = new Map();
-    function destroyAllCharts() {
-      for (const c of _charts.values()) {
-        try { c.stop(); } catch {}
-        try { c.destroy(); } catch {}
-      }
-      _charts.clear();
-    }
-    function initCharts() {
+
+    // Update-in-place lifecycle (Stage 5.5).
+    //
+    // Charts initialize once per CHART KEY ('customer-donut', 'income-trend',
+    // etc.) and are kept alive across re-renders. On every render() we:
+    //   1. Detach the saved canvases from DOM (innerHTML wipe is about to
+    //      destroy whatever is in <root>; canvases are kept as JS refs
+    //      inside _charts so their Chart instances aren't GC'd).
+    //   2. innerHTML = layout(view()) — view templates emit a fresh,
+    //      empty <canvas data-chart="<key>"> at each chart site.
+    //   3. ensureCharts() walks the new canvas slots: for keys we already
+    //      have, REPLACE the empty placeholder canvas with the saved one
+    //      (which already has its Chart bound) and update data via
+    //      chart.data = … + chart.update('none'). For new keys, construct
+    //      a Chart on the freshly-rendered canvas.
+    //   4. Sweep — any saved key that didn't appear in this render is
+    //      destroyed.
+    //
+    // Net effect: period-change re-renders mutate chart data instead of
+    // building a new Chart instance. No destroy/rebuild cycle, no animator
+    // teardown races, no layout flash. Tab switches that change which
+    // charts exist destroy the old ones and create the new ones cleanly.
+    //
+    // Spec note: the user's spec said "Map keyed by canvas DOM element",
+    // but the views recreate canvas elements on every innerHTML wipe — a
+    // canvas-keyed Map would never find its entry, defeating the whole
+    // pattern. Keying by the chart-key string and replacing the new
+    // empty canvas with the saved instance preserves the Chart across
+    // renders the way the spec intends.
+    const _charts = new Map();   // key → { canvas, chart }
+
+    function ensureCharts() {
       if (typeof Chart === 'undefined') return;
-      document.querySelectorAll('canvas[data-chart]').forEach(canvas => {
-        const key = canvas.dataset.chart;
+      const seen = new Set();
+      document.querySelectorAll('canvas[data-chart]').forEach(newCanvas => {
+        const key = newCanvas.dataset.chart;
+        seen.add(key);
         const builder = CHART_BUILDERS[key];
         if (!builder) return;
-        // Defensive: if Chart.js's internal registry still thinks something
-        // owns this canvas, tear it down before constructing a new one.
-        const orphan = Chart.getChart(canvas);
-        if (orphan) {
-          try { orphan.stop(); } catch {}
-          try { orphan.destroy(); } catch {}
+
+        const existing = _charts.get(key);
+
+        if (existing && existing.canvas) {
+          // Re-mount the saved canvas in place of the freshly-rendered one,
+          // so the Chart instance keeps its DOM context. Replace = preserve.
+          const cfg = builder(existing.canvas);
+          newCanvas.parentElement.replaceChild(existing.canvas, newCanvas);
+
+          if (!cfg) {
+            // Period now has no data — destroy and clear so the next render
+            // (with data again) constructs a fresh chart, and the slot
+            // doesn't show stale visualization.
+            try { existing.chart.stop(); existing.chart.destroy(); } catch {}
+            _charts.delete(key);
+            return;
+          }
+          try {
+            existing.chart.data = cfg.data;
+            // Allow option changes (e.g. legend position swap on viewport
+            // crossover). Most builders return stable options though.
+            if (cfg.options) existing.chart.options = cfg.options;
+            existing.chart.resize();        // re-measure after parent change
+            existing.chart.update('none');  // no transition animation
+          } catch (err) {
+            console.warn('[chart] update failed for', key, err);
+          }
+          return;
         }
-        const cfg = builder(canvas);
+
+        // First mount for this key — create from scratch.
+        const cfg = builder(newCanvas);
         if (!cfg) return;
         try {
-          const chart = new Chart(canvas, cfg);
-          _charts.set(canvas, chart);
+          const chart = new Chart(newCanvas, cfg);
+          _charts.set(key, { canvas: newCanvas, chart });
         } catch (err) {
           console.warn('[chart] init failed for', key, err);
         }
       });
+
+      // Any saved chart whose key didn't appear in this render is dead —
+      // destroy it so we don't leak the Chart instance and the (now
+      // detached) canvas it holds.
+      for (const [key, entry] of _charts) {
+        if (!seen.has(key)) {
+          try { entry.chart.stop(); entry.chart.destroy(); } catch {}
+          _charts.delete(key);
+        }
+      }
     }
+
     // Re-flow chart sizes on viewport resize without destroying instances.
     let _resizeTimer = null;
     window.addEventListener('resize', () => {
       if (_resizeTimer) clearTimeout(_resizeTimer);
       _resizeTimer = setTimeout(() => {
-        for (const c of _charts.values()) { try { c.resize(); } catch {} }
+        for (const { chart } of _charts.values()) {
+          try { chart.resize(); } catch {}
+        }
       }, 120);
     });
 
@@ -4770,20 +4829,22 @@
     const root = document.getElementById('root');
 
     function render() {
-      destroyAllCharts();
+      // Detach existing chart canvases BEFORE innerHTML wipe so the Chart
+      // instances and their canvas backing survive across renders. Without
+      // this, the wipe would orphan the canvases (and Chart.js's internal
+      // registry would crash on the next paint when it tried to reach them).
+      for (const { canvas } of _charts.values()) {
+        if (canvas.parentElement) canvas.parentElement.removeChild(canvas);
+      }
+
       const renderer = VIEW_RENDERERS[state.tab] || viewOverview;
       root.innerHTML = layout(renderer());
       if (typeof paintSyncIndicator === 'function') paintSyncIndicator();
-      // Init charts synchronously — Stage 5.1 deferred this through rAF +
-      // a single-pending dedupe to "let layout flush", but Chart.js with
-      // responsive:true uses its own ResizeObserver to react to layout, so
-      // the rAF buffer was unnecessary. The dedupe was the only async piece
-      // in the lifecycle and the most plausible source of skipped re-inits
-      // in real Chrome (works in headless because rAF timing is more
-      // predictable there). Sync init makes "every render() instantiates
-      // every canvas's chart" a hard guarantee with no scheduling state to
-      // get stuck.
-      initCharts();
+
+      // Mount: re-attach saved canvases + update their data, OR create new
+      // charts for keys that appeared for the first time, OR sweep keys that
+      // are gone.
+      ensureCharts();
     }
 
     // ============ Dropdown open/close (DOM-driven) ============
