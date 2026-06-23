@@ -152,6 +152,7 @@
       overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
     }
     .chart-wrap { position: relative; }
+    [data-chart] { display: block; height: 100%; }
 
     /* ============ Tailwind-class overrides (dark repaint) ============
        The source was authored against Tailwind's `stone` scale for a warm
@@ -2208,8 +2209,8 @@
           <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Net income trend</div>
           <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Last ${monthsBack} months</h2>
           <div class="chart-wrap" style="height: ${h};">
-            <canvas data-chart="income-trend" id="ch-income-trend" data-sr-target="ch-income-trend-sr"
-              aria-label="Net monthly income" aria-describedby="ch-income-trend-sr"></canvas>
+            <div data-chart="income-trend" id="ch-income-trend" data-sr-target="ch-income-trend-sr"
+              aria-label="Net monthly income" aria-describedby="ch-income-trend-sr"></div>
             <div id="ch-income-trend-sr" data-sr></div>
           </div>
         </div>
@@ -2227,8 +2228,8 @@
               <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Vendor concentration</div>
               <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Top 5 vendors this ${periodWord}</h2>
               <div class="chart-wrap" style="height: ${h};">
-                <canvas data-chart="vendor-donut" id="ch-vendor-donut" data-sr-target="ch-vendor-donut-sr"
-                  aria-label="Vendor expense concentration donut" aria-describedby="ch-vendor-donut-sr"></canvas>
+                <div data-chart="vendor-donut" id="ch-vendor-donut" data-sr-target="ch-vendor-donut-sr"
+                  aria-label="Vendor expense concentration donut" aria-describedby="ch-vendor-donut-sr"></div>
                 <div id="ch-vendor-donut-sr" data-sr></div>
               </div>
             </div>
@@ -2238,8 +2239,8 @@
               <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Category breakdown</div>
               <h2 class="font-serif text-lg font-light text-stone-900 mb-3">By month, top 5 categories</h2>
               <div class="chart-wrap" style="height: ${h};">
-                <canvas data-chart="category-stacked" id="ch-cat-stack" data-sr-target="ch-cat-stack-sr"
-                  aria-label="Expenses by category and month" aria-describedby="ch-cat-stack-sr"></canvas>
+                <div data-chart="category-stacked" id="ch-cat-stack" data-sr-target="ch-cat-stack-sr"
+                  aria-label="Expenses by category and month" aria-describedby="ch-cat-stack-sr"></div>
                 <div id="ch-cat-stack-sr" data-sr></div>
               </div>
             </div>
@@ -2731,8 +2732,8 @@
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Revenue concentration</div>
             <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Top 5 customers + everyone else</h2>
             <div class="chart-wrap" style="height: ${chartHeight};">
-              <canvas data-chart="customer-donut" id="ch-customer-donut"
-                aria-label="Customer revenue concentration donut" aria-describedby="ch-customer-donut-sr"></canvas>
+              <div data-chart="customer-donut" id="ch-customer-donut"
+                aria-label="Customer revenue concentration donut" aria-describedby="ch-customer-donut-sr"></div>
               <div id="ch-customer-donut-sr" data-sr></div>
             </div>
           </div>
@@ -2740,8 +2741,8 @@
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Net income trend</div>
             <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Last ${state.period === 'month' ? 6 : 12} months</h2>
             <div class="chart-wrap" style="height: ${chartHeight};">
-              <canvas data-chart="income-trend" id="ch-customer-trend" data-sr-target="ch-customer-trend-sr"
-                aria-label="Net income over recent months" aria-describedby="ch-customer-trend-sr"></canvas>
+              <div data-chart="income-trend" id="ch-customer-trend" data-sr-target="ch-customer-trend-sr"
+                aria-label="Net income over recent months" aria-describedby="ch-customer-trend-sr"></div>
               <div id="ch-customer-trend-sr" data-sr></div>
             </div>
           </div>
@@ -3312,8 +3313,8 @@
               <h2 class="font-serif text-xl font-light text-stone-900">FY${targetFY} expenses by month and category</h2>
             </div>
             <div class="p-5 chart-wrap" style="height: ${isNarrowViewport() ? '300px' : '340px'};">
-              <canvas data-chart="category-stacked" id="ch-tax-stack" data-sr-target="ch-tax-stack-sr" data-scope="tax-fy"
-                aria-label="FY expenses by category and month" aria-describedby="ch-tax-stack-sr"></canvas>
+              <div data-chart="category-stacked" id="ch-tax-stack" data-sr-target="ch-tax-stack-sr" data-scope="tax-fy"
+                aria-label="FY expenses by category and month" aria-describedby="ch-tax-stack-sr"></div>
               <div id="ch-tax-stack-sr" data-sr></div>
             </div>
           `) : ''}
@@ -4408,7 +4409,7 @@
     // since we inline it before this script — but defensive).
     document.addEventListener('DOMContentLoaded', applyChartTheme, { once: true });
 
-    // Chart lifecycle. Views render <canvas data-chart="<key>" id="<id>"></canvas>;
+    // Chart lifecycle. Views render <div data-chart="<key>" id="<id>"></div>;
     // after each render() we destroy the previous Chart instances and walk the
     // DOM to instantiate fresh ones from the CHART_BUILDERS registry. Keeps the
     // existing full-re-render model honest without leaking GPU contexts.
@@ -4461,6 +4462,85 @@
 
     const CHART_SURFACE_BORDER = '#1d1f23'; // var(--surface) for slice gaps
 
+    // ---- Inline SVG chart renderers ---------------------------------------
+    // These replace Chart.js canvases. Each returns an HTML string that the
+    // view injects directly, so the charts are plain DOM that rebuilds with
+    // every render() and always reflects the active period. No canvas, no
+    // chart instances, nothing to leave stale.
+    function svgDonut({ labels, values, colors, cur, total }) {
+      const R = 54, SW = 22, C = 2 * Math.PI * R;
+      let acc = 0;
+      const rings = values.map((v, i) => {
+        const frac = total > 0 ? v / total : 0;
+        const dash = Math.max(0, frac * C);
+        const seg = `<circle cx="72" cy="72" r="${R}" fill="none" stroke="${colors[i]}" stroke-width="${SW}" stroke-dasharray="${dash.toFixed(2)} ${(C - dash).toFixed(2)}" stroke-dashoffset="${(-acc * C).toFixed(2)}" transform="rotate(-90 72 72)"></circle>`;
+        acc += frac;
+        return seg;
+      }).join('');
+      const legend = labels.map((l, i) => {
+        const pct = total > 0 ? (values[i] / total) * 100 : 0;
+        return `<li style="display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px;line-height:1.3;">
+          <span style="width:10px;height:10px;border-radius:2px;background:${colors[i]};flex:none;"></span>
+          <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(l)}</span>
+          <span style="color:#9c9a97;font-variant-numeric:tabular-nums;white-space:nowrap;">${fmt(values[i], cur)} · ${pct.toFixed(0)}%</span>
+        </li>`;
+      }).join('');
+      return `<div style="height:100%;display:flex;align-items:center;justify-content:center;gap:18px;flex-wrap:wrap;">
+        <svg viewBox="0 0 144 144" width="150" height="150" style="flex:none;max-width:46%;min-width:118px;">${rings}</svg>
+        <ul style="list-style:none;margin:0;padding:0;flex:1;min-width:168px;">${legend}</ul>
+      </div>`;
+    }
+
+    function svgStackedBars({ labels, cats, matrix, colors, cur }) {
+      const totals = matrix.map(row => cats.reduce((s, c) => s + (row[c] || 0), 0));
+      const maxTotal = Math.max(1, ...totals);
+      const n = labels.length;
+      const W = 340, padL = 38, padR = 6, rowH = 20, gap = 12, padT = 4;
+      const barW = W - padL - padR;
+      const H = padT * 2 + n * rowH + (n - 1) * gap;
+      let rows = '';
+      labels.forEach((lab, i) => {
+        const y = padT + i * (rowH + gap);
+        let x = padL, seg = '';
+        cats.forEach((c, ci) => {
+          const v = matrix[i][c] || 0;
+          const w = (v / maxTotal) * barW;
+          if (w > 0.4) seg += `<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="${rowH}" rx="2" fill="${colors[ci]}"></rect>`;
+          x += w;
+        });
+        rows += `<text x="${padL - 7}" y="${y + rowH / 2 + 4}" text-anchor="end" font-size="11" fill="#9c9a97">${esc(lab)}</text>${seg}`;
+      });
+      const legend = cats.map((c, ci) => `<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#cfccc6;margin:0 12px 4px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${colors[ci]};flex:none;"></span>${esc(c)}</span>`).join('');
+      return `<div style="height:100%;display:flex;flex-direction:column;justify-content:center;gap:10px;">
+        <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;max-height:100%;" preserveAspectRatio="xMidYMid meet">${rows}</svg>
+        <div style="display:flex;flex-wrap:wrap;">${legend}</div>
+      </div>`;
+    }
+
+    function svgLine({ labels, values, cur }) {
+      const W = 340, H = 150, padL = 30, padR = 8, padT = 12, padB = 22;
+      const n = values.length;
+      const iw = W - padL - padR, ih = H - padT - padB;
+      const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
+      const range = (hi - lo) || 1;
+      const X = i => padL + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
+      const Y = v => padT + (1 - (v - lo) / range) * ih;
+      const zeroY = Y(0);
+      const pts = values.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`);
+      const area = n > 1 ? `<polygon fill="rgba(163,201,163,0.16)" points="${X(0).toFixed(1)},${zeroY.toFixed(1)} ${pts.join(' ')} ${X(n - 1).toFixed(1)},${zeroY.toFixed(1)}"></polygon>` : '';
+      const line = `<polyline fill="none" stroke="#a3c9a3" stroke-width="2" stroke-linejoin="round" points="${pts.join(' ')}"></polyline>`;
+      const dots = values.map((v, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="3" fill="#a3c9a3" stroke="#1d1f23" stroke-width="1.5"></circle>`).join('');
+      const xlabels = labels.map((l, i) => `<text x="${X(i).toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="10" fill="#6b6a68">${esc(l)}</text>`).join('');
+      const zero = `<line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W - padR}" y2="${zeroY.toFixed(1)}" stroke="rgba(255,255,255,0.08)" stroke-width="1"></line>`;
+      return `<div style="height:100%;display:flex;align-items:center;">
+        <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;max-height:100%;" preserveAspectRatio="xMidYMid meet">${zero}${area}${line}${dots}${xlabels}</svg>
+      </div>`;
+    }
+
+    function svgChartEmpty(msg) {
+      return `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#6b6a68;font-size:13px;">${esc(msg || 'No data for this period')}</div>`;
+    }
+
     const CHART_BUILDERS = {
 
       // 1. Customer concentration donut — top 5 customers by lifetime net
@@ -4483,23 +4563,7 @@
             data.map((v, i) => [labels[i], fmt(v, cur), `${((v / total) * 100).toFixed(1)}%`])
           );
         }
-        return {
-          type: 'doughnut',
-          data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: CHART_SURFACE_BORDER, borderWidth: 2, hoverOffset: 6 }] },
-          options: {
-            responsive: true, maintainAspectRatio: false, cutout: '62%',
-            animation: false,                 // see Chart.defaults.animation above
-            plugins: {
-              legend: { position: isNarrowViewport() ? 'bottom' : 'right', labels: { boxWidth: 10, boxHeight: 10, padding: 10 } },
-              tooltip: { callbacks: {
-                label: (ctx) => {
-                  const v = ctx.parsed; const pct = total > 0 ? (v / total) * 100 : 0;
-                  return ` ${ctx.label}: ${fmt(v, cur)} (${pct.toFixed(1)}%)`;
-                }
-              }}
-            }
-          }
-        };
+        return svgDonut({ labels, values: data, colors, cur, total });
       },
 
       // 2. Income trend line — net monthly income over the last N months
@@ -4518,32 +4582,7 @@
             buckets.map(b => [`${b.label} ${b.year}`, fmt(b.value, cur)])
           );
         }
-        return {
-          type: 'line',
-          data: { labels, datasets: [{
-            label: 'Net income',
-            data,
-            borderColor: '#a3c9a3',                       // sage
-            backgroundColor: 'rgba(163, 201, 163, 0.18)',
-            fill: true,
-            tension: 0.32,
-            pointRadius: 4, pointHoverRadius: 6,
-            pointBackgroundColor: '#a3c9a3', pointBorderColor: CHART_SURFACE_BORDER, pointBorderWidth: 2,
-            borderWidth: 2,
-          }]},
-          options: {
-            responsive: true, maintainAspectRatio: false,
-            animation: false,                 // see Chart.defaults.animation above
-            plugins: {
-              legend: { display: false },
-              tooltip: { callbacks: { label: (ctx) => ` ${fmt(ctx.parsed.y, cur)}` } }
-            },
-            scales: {
-              x: { grid: { display: false }, ticks: { color: '#6b6a68' } },
-              y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#6b6a68', callback: (v) => fmt(v, cur).replace(/\.00$/, '') } }
-            }
-          }
-        };
+        return svgLine({ labels, values: data, cur });
       },
 
       // 3. Vendor concentration donut — top 5 vendors in active period.
@@ -4579,21 +4618,7 @@
             data.map((v, i) => [labels[i], fmt(v, cur), `${((v / total) * 100).toFixed(1)}%`])
           );
         }
-        return {
-          type: 'doughnut',
-          data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: CHART_SURFACE_BORDER, borderWidth: 2, hoverOffset: 6 }] },
-          options: {
-            responsive: true, maintainAspectRatio: false, cutout: '62%',
-            animation: false,                 // see Chart.defaults.animation above
-            plugins: {
-              legend: { position: isNarrowViewport() ? 'bottom' : 'right', labels: { boxWidth: 10, boxHeight: 10, padding: 10 } },
-              tooltip: { callbacks: { label: (ctx) => {
-                const v = ctx.parsed; const pct = total > 0 ? (v / total) * 100 : 0;
-                return ` ${ctx.label}: ${fmt(v, cur)} (${pct.toFixed(1)}%)`;
-              }}}
-            }
-          }
-        };
+        return svgDonut({ labels, values: data, colors, cur, total });
       },
 
       // 4. Category stacked bars — months × category breakdown across the
@@ -4696,30 +4721,7 @@
           );
         }
 
-        const horizontal = !isNarrowViewport();
-        return {
-          type: 'bar',
-          data: { labels, datasets },
-          options: {
-            responsive: true, maintainAspectRatio: false,
-            animation: false,                 // see Chart.defaults.animation above
-            indexAxis: horizontal ? 'y' : 'x',
-            plugins: {
-              legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, padding: 8 } },
-              tooltip: { callbacks: {
-                label: (ctx) => ` ${ctx.dataset.label}: ${fmt(ctx.parsed[horizontal ? 'x' : 'y'], cur)}`,
-                footer: (items) => {
-                  const sum = items.reduce((s, it) => s + it.parsed[horizontal ? 'x' : 'y'], 0);
-                  return `Total: ${fmt(sum, cur)}`;
-                }
-              }}
-            },
-            scales: {
-              x: { stacked: true, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#6b6a68', callback: (v) => horizontal ? fmt(v, cur).replace(/\.00$/, '') : v } },
-              y: { stacked: true, grid: { display: false }, ticks: { color: '#6b6a68', callback: (v, idx) => horizontal ? labels[idx] : fmt(v, cur).replace(/\.00$/, '') } }
-            }
-          }
-        };
+        return svgStackedBars({ labels, cats: datasetCategories, matrix, colors: datasets.map(d => d.backgroundColor), cur });
       }
 
     };
@@ -4732,7 +4734,7 @@
     //      destroy whatever is in <root>; canvases are kept as JS refs
     //      inside _charts so their Chart instances aren't GC'd).
     //   2. innerHTML = layout(view()) — view templates emit a fresh,
-    //      empty <canvas data-chart="<key>"> at each chart site.
+    //      empty <div data-chart="<key>"> at each chart site.
     //   3. ensureCharts() walks the new canvas slots: for keys we already
     //      have, REPLACE the empty placeholder canvas with the saved one
     //      (which already has its Chart bound) and update data via
@@ -4769,19 +4771,13 @@
     // the active period after a change. Keyed by canvas id (unique per slot)
     // so two charts sharing a data-chart key on different tabs never collide.
     function ensureCharts() {
-      if (typeof Chart === 'undefined') return;
-      document.querySelectorAll('canvas[data-chart]').forEach(canvas => {
-        const key = canvas.dataset.chart;
+      document.querySelectorAll('[data-chart]').forEach(host => {
+        const key = host.dataset.chart;
         const builder = CHART_BUILDERS[key];
         if (!builder) return;
-        const cfg = builder(canvas);
-        if (!cfg) return;   // no data for this period → leave the slot empty
-        try {
-          const chart = new Chart(canvas, cfg);
-          _charts.set(canvas.id || key, { canvas, chart });
-        } catch (err) {
-          console.warn('[chart] init failed for', key, err);
-        }
+        let out = null;
+        try { out = builder(host); } catch (err) { console.warn('[chart] build failed for', key, err); }
+        host.innerHTML = out || svgChartEmpty();
       });
     }
 
