@@ -2226,7 +2226,7 @@
           ${card(`
             <div class="p-5">
               <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Vendor concentration</div>
-              <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Top 5 vendors this ${periodWord}</h2>
+              <h2 class="font-serif text-lg font-light text-stone-900 mb-3">${state.period === 'month' ? 'Top 5 vendors, last 3 months' : `Top 5 vendors this ${periodWord}`}</h2>
               <div class="chart-wrap" style="height: ${h};">
                 <div data-chart="vendor-donut" id="ch-vendor-donut" data-sr-target="ch-vendor-donut-sr"
                   aria-label="Vendor expense concentration donut" aria-describedby="ch-vendor-donut-sr"></div>
@@ -4588,8 +4588,20 @@
       // 3. Vendor concentration donut — top 5 vendors in active period.
       'vendor-donut': (canvas) => {
         const cur = state.data.settings.currency;
+        // Month mode shows a rolling 3-month window (selected month + 2 prior)
+        // so the vendor mix is meaningful instead of one month of identical subs.
+        const monthWindow = (() => {
+          if (state.period !== 'month') return null;
+          const [wy, wm] = state.currentMonth.split('-').map(Number);
+          const keys = new Set();
+          for (let i = 2; i >= 0; i--) {
+            const d = new Date(wy, wm - 1 - i, 1);
+            keys.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+          }
+          return keys;
+        })();
         const inP = (iso) => {
-          if (state.period === 'month')   return monthKey(iso) === state.currentMonth;
+          if (state.period === 'month')   return monthWindow.has(monthKey(iso));
           if (state.period === 'quarter') return isoInQuarter(iso, state.currentQuarter);
           return isoInFY(iso, state.currentFY);
         };
@@ -4613,7 +4625,7 @@
         const srHost = document.getElementById(canvas.dataset.srTarget);
         if (srHost) {
           srHost.innerHTML = srSummaryTable(canvas.id + '-tbl',
-            `Vendor concentration this ${state.period}: top 5 plus Everyone else`,
+            `Vendor concentration ${state.period === 'month' ? 'over the last 3 months' : 'this ' + state.period}: top 5 plus Everyone else`,
             ['Vendor', 'Total', '% of expenses'],
             data.map((v, i) => [labels[i], fmt(v, cur), `${((v / total) * 100).toFixed(1)}%`])
           );
