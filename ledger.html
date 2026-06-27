@@ -71,9 +71,60 @@
       --shadow-card:    0 1px 2px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.05);
       --shadow-field:   0 1px 2px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.06);
       --shadow-pop:     0 12px 32px -8px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.08);
+
+      /* Translucent bars (sticky period bar, mobile tab bar) */
+      --glass:     rgba(22,24,26,0.82);
+      --glass-bar: rgba(18,19,21,0.92);
+      /* Subtle gridline tone for charts */
+      --grid:      rgba(255,255,255,0.07);
+    }
+
+    /* ============ Light theme ============ */
+    html[data-theme="light"] {
+      --bg:             #f4f2ec;
+      --sidebar:        #eae7df;
+      --surface:        #ffffff;
+      --surface-2:      #f6f4ee;
+      --surface-raised: #ffffff;
+      --border:         rgba(40,37,33,0.08);
+      --border-strong:  rgba(40,37,33,0.13);
+
+      --accent:         #6a53a6;
+      --accent-dim:     #8d7fb1;
+      --accent-glow:    rgba(106,83,166,0.10);
+
+      --cream:          #5a554f;
+      --cream-dim:      #8a857e;
+
+      --text:           #211f1c;
+      --text-muted:     #6b6864;
+      --text-faint:     #9c9a95;
+
+      --income:         #3f7d52;
+      --income-bg:      rgba(63,125,82,0.11);
+      --expense:        #b06a4f;
+      --expense-bg:     rgba(176,106,79,0.11);
+      --danger:         #c0392b;
+      --danger-bg:      rgba(192,57,43,0.08);
+      --warn:           #b07d12;
+
+      --shadow-card:    0 1px 2px rgba(40,37,33,0.06), 0 0 0 1px rgba(40,37,33,0.05);
+      --shadow-field:   0 1px 2px rgba(40,37,33,0.06), 0 0 0 1px rgba(40,37,33,0.07);
+      --shadow-pop:     0 14px 36px -10px rgba(40,37,33,0.20), 0 0 0 1px rgba(40,37,33,0.08);
+
+      --glass:     rgba(244,242,236,0.82);
+      --glass-bar: rgba(244,242,236,0.92);
+      --grid:      rgba(40,37,33,0.08);
+    }
+    html[data-theme="light"] input[type="date"]::-webkit-calendar-picker-indicator { filter: none; }
+    html[data-theme="light"] .seg-toggle button.active {
+      box-shadow: inset 0 0 0 1px rgba(106,83,166,0.40);
     }
 
     html, body { background: var(--bg); color: var(--text); }
+    html { transition: none; }
+    .bg-white, .bg-stone-50, .bg-stone-100, .bg-stone-200,
+    [style*="--surface"], aside, nav { transition: background-color 200ms ease, color 200ms ease, box-shadow 200ms ease; }
     body { font-family: 'DM Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
     .font-serif { font-family: 'Fraunces', serif; }
     .font-mono  { font-family: 'JetBrains Mono', monospace; }
@@ -231,6 +282,16 @@
     }
     .print-only { display: none; }
   </style>
+  <script>
+    // Apply saved theme before first paint to avoid a flash.
+    (function () {
+      try {
+        var t = localStorage.getItem('ventra-ledger-theme');
+        if (!t) t = 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
+    })();
+  </script>
 </head>
 <body>
   <div id="root">
@@ -251,6 +312,9 @@
       'Software/SaaS', 'Telephony/Telco', 'Contractors', 'Marketing',
       'Subscriptions', 'Office', 'Travel', 'Professional Fees', 'Bank Fees', 'Other'
     ];
+    // Income categories: these defaults plus any custom ones the user adds
+    // (custom additions are stored in state.data.incomeCategories and persist).
+    const DEFAULT_INCOME_CATEGORIES = ['Setup fee', 'Subscription', 'Usage', 'Add-on', 'Other'];
     const CURRENCY_OPTIONS = [
       { value: 'AUD', label: 'AUD — Australian Dollar' },
       { value: 'USD', label: 'USD — US Dollar' },
@@ -281,6 +345,11 @@
       // Per-customer friendly display names. Synced. Keyed by source/email
       // lowercased. Empty value = fall back to the original source string.
       customerNames: {},
+      // Client profiles keyed by source/email lowercased: { name, business, phone }.
+      // Spend is derived from income, not stored here.
+      clients: {},
+      // Custom income categories the user has added (defaults live in code).
+      incomeCategories: [],
       dataModifiedAt: null
     };
 
@@ -547,6 +616,28 @@
       out.customerNames = (data.customerNames && typeof data.customerNames === 'object' && !Array.isArray(data.customerNames))
         ? data.customerNames : {};
       out.settings.splitB = 50;
+      // Custom income categories — de-duped array of non-empty strings.
+      out.incomeCategories = Array.isArray(data.incomeCategories)
+        ? [...new Set(data.incomeCategories.map(s => (s || '').trim()).filter(Boolean))]
+        : [];
+      // Client profiles keyed by source/email lowercased: { name, business, phone }.
+      // Migrate legacy customerNames (name only) into the richer profile store.
+      const baseClients = (data.clients && typeof data.clients === 'object' && !Array.isArray(data.clients)) ? data.clients : {};
+      out.clients = {};
+      for (const [k, v] of Object.entries(baseClients)) {
+        if (!k) continue;
+        const p = (v && typeof v === 'object') ? v : { name: String(v || '') };
+        out.clients[k] = {
+          name: (p.name || '').trim(),
+          business: (p.business || '').trim(),
+          phone: (p.phone || '').trim()
+        };
+      }
+      for (const [k, name] of Object.entries(out.customerNames || {})) {
+        if (!k) continue;
+        if (!out.clients[k]) out.clients[k] = { name: (name || '').trim(), business: '', phone: '' };
+        else if (!out.clients[k].name) out.clients[k].name = (name || '').trim();
+      }
       out.expenses = (out.expenses || []).map(e => ({
         id: e.id || uid(),
         vendor: e.vendor || '',
@@ -563,6 +654,7 @@
         source: i.source || '',
         date: i.date || todayISO(),
         amount: parseAmount(i.amount),
+        category: i.category || '',
         notes: i.notes || '',
         editedBy: i.editedBy || undefined,
         editedAt: i.editedAt || undefined
@@ -627,6 +719,26 @@
       localStorage.setItem(SHOW_CHARTS_KEY, v ? '1' : '0');
     }
 
+    // Per-device light/dark theme preference. Not synced.
+    const THEME_KEY = 'ventra-ledger-theme';
+    function loadTheme() {
+      try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'; }
+      catch (e) { return 'dark'; }
+    }
+    function applyTheme(t) {
+      const theme = t === 'light' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', theme);
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', theme === 'light' ? '#f4f2ec' : '#16181a');
+      const sc = document.querySelector('meta[name="color-scheme"]');
+      if (sc) sc.setAttribute('content', theme === 'light' ? 'light' : 'dark');
+      CHART_PALETTE = theme === 'light' ? PALETTE_LIGHT : PALETTE_DARK;
+    }
+    function setTheme(t) {
+      try { localStorage.setItem(THEME_KEY, t); } catch (e) {}
+      applyTheme(t);
+    }
+
     function loadUser() { return localStorage.getItem(USER_KEY) || ''; }
     function saveUser(name) {
       if (name) localStorage.setItem(USER_KEY, name);
@@ -637,6 +749,7 @@
     const state = {
       data: loadData(),
       userName: loadUser(),
+      theme: loadTheme(),
       tab: 'overview',
       period: 'month',               // 'month' | 'quarter' | 'fy'
       currentMonth: todayISO().slice(0, 7),
@@ -1155,7 +1268,9 @@
       users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
       trendingUp: '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
       trendingDown: '<polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/>',
-      sparkle: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .963L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>'
+      sparkle: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .963L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
+      sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+      moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>'
     };
     function icon(name, size = 16, extraClass = '') {
       const path = ICON_PATHS[name] || '';
@@ -1189,6 +1304,22 @@
       return `<input${idAttr}${fieldAttr} type="${attr(type)}" value="${attr(v)}"${ph}${af}
         class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 placeholder:text-stone-400 focus:outline-none transition-all ${className}"
         style="${shadowField}" />`;
+    }
+
+    // Combo field: a text input with a <datalist> of suggestions. Lets you pick
+    // an existing value or type a new one (used for income categories — new ones
+    // are remembered on save). Degrades to a plain text input where datalist is
+    // unsupported, so typing still works.
+    function comboField({ id = '', value = '', field = '', listId = '', options = [], placeholder = '' }) {
+      const idAttr = id ? ` id="${attr(id)}"` : '';
+      const fieldAttr = field ? ` data-field="${attr(field)}"` : '';
+      const ph = placeholder ? ` placeholder="${attr(placeholder)}"` : '';
+      const v = value == null ? '' : value;
+      const opts = (options || []).map(o => `<option value="${attr(o)}"></option>`).join('');
+      return `<input${idAttr}${fieldAttr} type="text" value="${attr(v)}" list="${attr(listId)}"${ph} autocomplete="off"
+        class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 placeholder:text-stone-400 focus:outline-none transition-all"
+        style="${shadowField}" />
+        <datalist id="${attr(listId)}">${opts}</datalist>`;
     }
 
     // NumberField with +/- buttons. The input is a standard <input type="number">;
@@ -1288,7 +1419,7 @@
       { id: 'overview',    label: 'Overview',    icon: 'layoutDashboard' },
       { id: 'expenses',    label: 'Expenses',    icon: 'receipt' },
       { id: 'income',      label: 'Income',      icon: 'banknote' },
-      { id: 'customers',   label: 'Customers',   icon: 'users' },
+      { id: 'customers',   label: 'Clients',     icon: 'users' },
       { id: 'uncollected', label: 'Uncollected', icon: 'clock' },
       { id: 'loans',       label: 'Loans',       icon: 'handCoins' },
       { id: 'tax',         label: 'Tax',         icon: 'calculator' },
@@ -1349,6 +1480,12 @@
           <div class="px-3 py-1.5 text-[11px] text-stone-400 tracking-[0.05em]">
             ${esc(state.data.settings.partnerA)} &amp; ${esc(state.data.settings.partnerB)}
           </div>
+          <button type="button" data-action="toggle-theme"
+            class="w-full flex items-center gap-2 px-3 py-2 mt-1 rounded-xl text-[11px] font-medium tracking-[0.02em] text-stone-500 hover:text-stone-900 hover:bg-white/40 transition-colors"
+            title="Switch theme">
+            ${icon(state.theme === 'light' ? 'moon' : 'sun', 13)}
+            <span>${state.theme === 'light' ? 'Dark mode' : 'Light mode'}</span>
+          </button>
         </div>
       </aside>`;
     }
@@ -1367,7 +1504,7 @@
         </button>`;
       }).join('');
       return `<nav class="md:hidden fixed bottom-0 left-0 right-0 z-30 flex pb-safe no-print"
-        style="background-color: rgba(18, 19, 21, 0.95); backdrop-filter: blur(12px); border-top: 1px solid var(--border-strong);">
+        style="background-color: var(--glass-bar); backdrop-filter: blur(12px); border-top: 1px solid var(--border-strong);">
         ${buttons}
       </nav>`;
     }
@@ -1407,7 +1544,7 @@
       }
 
       return `<div class="sticky top-0 z-10 px-4 md:px-8 py-4 flex items-center justify-end gap-3 no-print"
-        style="background-color: rgba(22, 24, 26, 0.85); backdrop-filter: blur(12px);">
+        style="background-color: var(--glass); backdrop-filter: blur(12px);">
         <span class="text-[11px] tracking-[0.1em] uppercase text-stone-500 hidden sm:inline">Viewing</span>
         ${modeToggle}
         ${picker}
@@ -1539,7 +1676,7 @@
               </div>
               <span class="text-[11px] tracking-[0.1em] uppercase text-stone-500">Income in</span>
             </div>
-            <div class="text-[32px] font-medium text-stone-900 tabular-nums leading-none font-mono">${esc(fmt(totalInc, cur))}</div>
+            <div data-fit="34" data-fit-min="16" class="font-medium text-stone-900 tabular-nums leading-none font-mono" style="white-space:nowrap;overflow:hidden;">${esc(fmt(totalInc, cur))}</div>
             <div class="text-xs text-stone-500 mt-2">${periodIncome.length} ${periodIncome.length === 1 ? 'entry' : 'entries'}</div>
           `, 'p-6')}
           ${card(`
@@ -1549,7 +1686,7 @@
               </div>
               <span class="text-[11px] tracking-[0.1em] uppercase text-stone-500">Expenses out</span>
             </div>
-            <div class="text-[32px] font-medium text-stone-900 tabular-nums leading-none font-mono">${esc(fmt(totalExp, cur))}</div>
+            <div data-fit="34" data-fit-min="16" class="font-medium text-stone-900 tabular-nums leading-none font-mono" style="white-space:nowrap;overflow:hidden;">${esc(fmt(totalExp, cur))}</div>
             <div class="text-xs text-stone-500 mt-2">${periodExpenses.length} ${periodExpenses.length === 1 ? 'charge' : 'charges'}</div>
           `, 'p-6')}
           ${card(`
@@ -1559,7 +1696,7 @@
               </div>
               <span class="text-[11px] tracking-[0.1em] uppercase text-stone-400">Net profit</span>
             </div>
-            <div class="text-[32px] font-medium tabular-nums leading-none font-mono ${net >= 0 ? 'text-stone-50' : 'text-red-300'}">
+            <div data-fit="34" data-fit-min="16" class="font-medium tabular-nums leading-none font-mono ${net >= 0 ? 'text-stone-50' : 'text-red-300'}" style="white-space:nowrap;overflow:hidden;">
               ${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), cur))}
             </div>
             <div class="text-xs text-stone-400 mt-2">${({ month: 'After expenses this month', quarter: 'After expenses this quarter', fy: 'After expenses this FY' })[state.period]}</div>
@@ -1587,7 +1724,7 @@
                   <div class="text-[11px] text-stone-500">${p.pct}% share</div>
                 </div>
               </div>
-              <div class="text-2xl font-medium tabular-nums font-mono ${p.share >= 0 ? 'text-stone-900' : 'text-red-700'}">
+              <div data-fit="26" data-fit-min="14" class="font-medium tabular-nums font-mono ${p.share >= 0 ? 'text-stone-900' : 'text-red-700'}" style="white-space:nowrap;overflow:hidden;">
                 ${p.share >= 0 ? '' : '-'}${esc(fmt(Math.abs(p.share), cur))}
               </div>
             </div>`).join('')}
@@ -1604,24 +1741,35 @@
           </div>` : ''}
       `, 'p-6');
 
+      const trendBody = showCharts()
+        ? `<div class="chart-wrap" style="height:236px;">
+             <div data-chart="cashflow" id="ch-overview-cashflow" data-sr-target="ch-overview-cashflow-sr"
+               aria-label="Income versus expenses by month" aria-describedby="ch-overview-cashflow-sr"></div>
+             <div id="ch-overview-cashflow-sr" data-sr></div>
+           </div>`
+        : `<div class="flex items-end gap-2 md:gap-3 h-44 overflow-x-auto no-scrollbar">
+            ${trend.map(m => `
+              <div class="flex-1 min-w-[28px] flex flex-col items-center gap-2">
+                <div class="w-full flex items-end justify-center gap-1 h-36">
+                  <div class="w-1/2 rounded-t-lg" style="height:${(m.inc / maxTrend) * 100}%; min-height:${m.inc > 0 ? '3px' : '0'}; background-color:var(--income);" title="Income: ${esc(fmt(m.inc, cur))}"></div>
+                  <div class="w-1/2 rounded-t-lg" style="height:${(m.e / maxTrend) * 100}%; min-height:${m.e > 0 ? '3px' : '0'}; background-color:var(--expense);" title="Expenses: ${esc(fmt(m.e, cur))}"></div>
+                </div>
+                <div class="text-[11px] ${m.active ? 'text-stone-900 font-medium' : 'text-stone-500'}">${esc(m.label)}</div>
+              </div>`).join('')}
+          </div>`;
+
       const trendCard = card(`
-        <div class="flex items-center justify-between mb-5">
-          <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500">${state.period === 'fy' ? 'Twelve month trend' : 'Six month trend'}</div>
-          <div class="flex items-center gap-4 text-[11px] text-stone-600">
-            <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:var(--expense);"></div>Expenses</div>
+        <div class="flex items-start justify-between mb-5">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Cash flow</div>
+            <h2 class="font-serif text-lg font-light text-stone-900">${state.period === 'fy' ? 'Income vs expenses · 12 months' : 'Income vs expenses · 6 months'}</h2>
+          </div>
+          <div class="flex items-center gap-4 text-[11px] text-stone-600 pt-1">
             <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:var(--income);"></div>Income</div>
+            <div class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-sm" style="background-color:var(--expense);"></div>Expenses</div>
           </div>
         </div>
-        <div class="flex items-end gap-2 md:gap-3 h-44 overflow-x-auto no-scrollbar">
-          ${trend.map(m => `
-            <div class="flex-1 min-w-[28px] flex flex-col items-center gap-2">
-              <div class="w-full flex items-end justify-center gap-1 h-36">
-                <div class="w-1/2 rounded-t-lg transition-all duration-500" style="height:${(m.e / maxTrend) * 100}%; min-height:${m.e > 0 ? '3px' : '0'}; background-color:var(--expense);" title="Expenses: ${esc(fmt(m.e, cur))}"></div>
-                <div class="w-1/2 rounded-t-lg transition-all duration-500" style="height:${(m.inc / maxTrend) * 100}%; min-height:${m.inc > 0 ? '3px' : '0'}; background-color:var(--income);" title="Income: ${esc(fmt(m.inc, cur))}"></div>
-              </div>
-              <div class="text-[11px] ${m.active ? 'text-stone-900 font-medium' : 'text-stone-500'}">${esc(m.label)}</div>
-            </div>`).join('')}
-        </div>
+        ${trendBody}
       `, 'lg:col-span-2 p-6');
 
       const tilesCol = `
@@ -1679,13 +1827,13 @@
             <h1 class="font-serif text-4xl md:text-5xl font-light text-stone-900 leading-[1.05]">${esc(periodLabel)}</h1>
           </div>
           ${summaryRow}
-          ${insightsCard}
-          ${gstCard}
-          ${splitCard}
           <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
             ${trendCard}
             ${tilesCol}
           </div>
+          ${insightsCard}
+          ${gstCard}
+          ${splitCard}
           ${recentCard}
         </div>`;
     }
@@ -1994,7 +2142,7 @@
         <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
           <div>
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">BAS preview${inProgress ? ' · in progress' : ''}</div>
-            <h2 class="font-serif text-2xl font-light text-stone-900">${esc(quarterShort(qObj))} ${qObj.fy} (Q${qObj.q})</h2>
+            <h2 class="font-serif text-2xl font-light text-stone-900">${esc(quarterShort(qObj))} (Q${qObj.q})</h2>
             <div class="text-xs text-stone-500 mt-1">Treats all income as GST-inclusive at ${rate}%. Claimable GST is the GST component of expenses you've marked GST-inclusive.</div>
           </div>
           <div class="text-right">
@@ -2029,7 +2177,7 @@
         isExpense,
         listKey: isExpense ? 'expenses' : 'income',
         nameField: isExpense ? 'vendor' : 'source',
-        nameLabel: isExpense ? 'Vendor' : 'Source',
+        nameLabel: isExpense ? 'Vendor' : 'Client',
         title: isExpense ? 'Expenses' : 'Income',
         helpText: isExpense
           ? 'Everything coming out of the business account.'
@@ -2107,9 +2255,9 @@
       const addForm = card(`
         <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-3">Add ${esc(addLabel)}</div>
         <form data-add-form="${kind}" class="grid grid-cols-1 md:grid-cols-12 gap-3" onsubmit="return false;">
-          <div class="md:col-span-${isExpense ? 3 : 4}">
+          <div class="md:col-span-3">
             ${label(nameLabel)}
-            ${textField({ value: '', field: nameField, placeholder: isExpense ? 'e.g. ElevenLabs' : 'e.g. Stripe payout' })}
+            ${textField({ value: '', field: nameField, placeholder: isExpense ? 'e.g. ElevenLabs' : 'e.g. client@email.com' })}
           </div>
           ${isExpense ? `
           <div class="md:col-span-${gstEnabled ? 2 : 3}">
@@ -2121,12 +2269,16 @@
               field: 'category',
               placeholder: '—'
             })}
-          </div>` : ''}
+          </div>` : `
+          <div class="md:col-span-2">
+            ${label('Category')}
+            ${comboField({ id: 'add-income-category', value: '', field: 'category', listId: 'dl-add-income-category', options: incomeCategoryList(), placeholder: '—' })}
+          </div>`}
           <div class="md:col-span-2">
             ${label('Date')}
             ${textField({ type: 'date', value: todayISO(), field: 'date' })}
           </div>
-          <div class="md:col-span-${isExpense ? 2 : 3}">
+          <div class="md:col-span-2">
             ${label('Amount')}
             ${numberField({ id: `add-${kind}-amount`, field: 'amount' })}
           </div>
@@ -2162,7 +2314,7 @@
             <thead>
               <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid var(--border);">
                 <th class="text-left font-medium px-4 md:px-6 py-4 cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="${nameField}">${esc(nameLabel)}${arrow(nameField)}</th>
-                ${isExpense ? `<th class="text-left font-medium px-4 md:px-6 py-4 hidden md:table-cell cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="category">Category${arrow('category')}</th>` : ''}
+                <th class="text-left font-medium px-4 md:px-6 py-4 hidden md:table-cell cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="category">Category${arrow('category')}</th>
                 <th class="text-left font-medium px-4 md:px-6 py-4 cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="date">Date${arrow('date')}</th>
                 <th class="text-right font-medium px-4 md:px-6 py-4 cursor-pointer hover:text-stone-900 transition-colors" data-action="sort" data-kind="${kind}" data-field="amount">Amount${arrow('amount')}</th>
                 <th class="text-left font-medium px-4 md:px-6 py-4 hidden lg:table-cell">Notes</th>
@@ -2204,14 +2356,26 @@
     function incomeChartsBlock() {
       const h = isNarrowViewport() ? '240px' : '300px';
       const monthsBack = state.period === 'month' ? 6 : 12;
+      const catWord = state.period === 'month' ? 'This month' : state.period === 'quarter' ? 'This quarter' : 'This FY';
       return card(`
-        <div class="p-5">
-          <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Net income trend</div>
-          <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Last ${monthsBack} months</h2>
-          <div class="chart-wrap" style="height: ${h};">
-            <div data-chart="income-trend" id="ch-income-trend" data-sr-target="ch-income-trend-sr"
-              aria-label="Net monthly income" aria-describedby="ch-income-trend-sr"></div>
-            <div id="ch-income-trend-sr" data-sr></div>
+        <div class="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Net income trend</div>
+            <h2 class="font-serif text-lg font-light text-stone-900 mb-3">Last ${monthsBack} months</h2>
+            <div class="chart-wrap" style="height: ${h};">
+              <div data-chart="income-trend" id="ch-income-trend" data-sr-target="ch-income-trend-sr"
+                aria-label="Net monthly income" aria-describedby="ch-income-trend-sr"></div>
+              <div id="ch-income-trend-sr" data-sr></div>
+            </div>
+          </div>
+          <div>
+            <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-1">Income by category</div>
+            <h2 class="font-serif text-lg font-light text-stone-900 mb-3">${catWord}</h2>
+            <div class="chart-wrap" style="height: ${h};">
+              <div data-chart="income-category" id="ch-income-category" data-sr-target="ch-income-category-sr"
+                aria-label="Income by category" aria-describedby="ch-income-category-sr"></div>
+              <div id="ch-income-category-sr" data-sr></div>
+            </div>
           </div>
         </div>
       `, 'overflow-hidden');
@@ -2383,15 +2547,11 @@
       if (editing) {
         return `<tr data-edit-row="${item.id}" style="background-color:var(--surface-2); border-bottom: 1px solid var(--border);">
           <td class="px-4 md:px-6 py-2.5">${textField({ value: item[nameField] || '', field: nameField })}</td>
-          ${isExpense ? `<td class="px-4 md:px-6 py-2.5 hidden md:table-cell">
-            ${dropdown({
-              id: `edit-category-${item.id}`,
-              value: item.category || '',
-              options: [{ value: '', label: '—' }, ...EXPENSE_CATEGORIES.map(c => ({ value: c, label: c }))],
-              field: 'category',
-              placeholder: '—'
-            })}
-          </td>` : ''}
+          <td class="px-4 md:px-6 py-2.5 hidden md:table-cell">
+            ${isExpense
+              ? dropdown({ id: `edit-category-${item.id}`, value: item.category || '', options: [{ value: '', label: '—' }, ...EXPENSE_CATEGORIES.map(c => ({ value: c, label: c }))], field: 'category', placeholder: '—' })
+              : comboField({ id: `edit-category-${item.id}`, value: item.category || '', field: 'category', listId: `dl-edit-income-${item.id}`, options: incomeCategoryList(), placeholder: '—' })}
+          </td>
           <td class="px-4 md:px-6 py-2.5">${textField({ type: 'date', value: item.date, field: 'date' })}</td>
           <td class="px-4 md:px-6 py-2.5">${numberField({ id: `edit-amount-${item.id}`, value: String(item.amount || ''), field: 'amount' })}</td>
           <td class="px-4 md:px-6 py-2.5 hidden lg:table-cell">${textField({ value: item.notes || '', field: 'notes' })}</td>
@@ -2404,19 +2564,22 @@
         </tr>`;
       }
 
-      // For income rows, surface the friendly customer display name in a hover
-      // tooltip. Keep the email/source visible — more identifying for accountancy.
-      const display = (M.isExpense || !item[nameField]) ? '' : customerDisplayName(item[nameField]);
-      const titleAttr = display ? ` title="${attr(display)}"` : '';
+      // Income rows lead with the client's name/business (falls back to the raw
+      // source). When the display differs from the source, show the email/source
+      // beneath as a subtitle — identifying for accountancy without being the headline.
+      const src = item[nameField] || '';
+      const lead = M.isExpense ? src : customerDisplayLabel(src);
+      const showSrcSub = !M.isExpense && !!lead && lead !== src;
       return `<tr class="group hover:bg-stone-50 transition-colors" style="border-bottom: 1px solid var(--border);">
-        <td class="px-4 md:px-6 py-4 text-stone-900"${titleAttr}>
-          <div>${esc(item[nameField] || '')}</div>
+        <td class="px-4 md:px-6 py-4 text-stone-900">
+          <div>${esc(lead)}</div>
+          ${showSrcSub ? `<div class="text-[11px] text-stone-500 truncate max-w-[240px]" title="${attr(src)}">${esc(src)}</div>` : ''}
           ${editedStamp}
         </td>
-        ${isExpense ? `<td class="px-4 md:px-6 py-4 hidden md:table-cell text-stone-600 text-xs">
+        <td class="px-4 md:px-6 py-4 hidden md:table-cell text-stone-600 text-xs">
           ${item.category ? `<span class="inline-block px-2.5 py-1 rounded-full text-[11px]" style="background-color:var(--surface-2); color:var(--cream-dim);">${esc(item.category)}</span>` : '—'}
-          ${gstEnabled && item.gstInclusive ? `<span class="ml-1 inline-block px-1.5 py-0.5 rounded-md text-[10px]" style="background-color:var(--income-bg); color:var(--income);">GST</span>` : ''}
-        </td>` : ''}
+          ${isExpense && gstEnabled && item.gstInclusive ? `<span class="ml-1 inline-block px-1.5 py-0.5 rounded-md text-[10px]" style="background-color:var(--income-bg); color:var(--income);">GST</span>` : ''}
+        </td>
         <td class="px-4 md:px-6 py-4 text-stone-600 tabular-nums text-xs font-mono">${esc(fmtDate(item.date))}</td>
         <td class="px-4 md:px-6 py-4 text-right tabular-nums font-medium font-mono">${esc(fmt(parseAmount(item.amount), currency))}</td>
         <td class="px-4 md:px-6 py-4 text-stone-500 text-xs hidden lg:table-cell">${esc(item.notes || '')}</td>
@@ -2440,23 +2603,49 @@
     // Customer display names. Synced via state.data.customerNames.
     // Empty / missing override → fall back to the original source string.
     const customerKey = (source) => (source || '').trim().toLowerCase();
-    function customerDisplayName(source) {
+    // ---- Income categories: defaults + user-added, de-duped ----
+    function incomeCategoryList() {
+      const custom = (state.data.incomeCategories || []).filter(Boolean);
+      return [...new Set([...DEFAULT_INCOME_CATEGORIES, ...custom])];
+    }
+    // Pure: returns the next incomeCategories array with `cat` remembered if new.
+    function withIncomeCategory(list, cat) {
+      const c = (cat || '').trim();
+      if (!c || DEFAULT_INCOME_CATEGORIES.includes(c) || (list || []).includes(c)) return list || [];
+      return [...(list || []), c];
+    }
+
+    // ---- Client profiles (name / business / phone), keyed by source ----
+    function clientProfile(source) {
       const k = customerKey(source);
-      return (state.data.customerNames && state.data.customerNames[k]) || '';
+      return (state.data.clients && state.data.clients[k]) || { name: '', business: '', phone: '' };
+    }
+    function customerDisplayName(source) {
+      return clientProfile(source).name || '';
     }
     function customerDisplayLabel(source) {
-      return customerDisplayName(source) || (source || '').trim();
+      const p = clientProfile(source);
+      return p.name || p.business || (source || '').trim();
     }
-    function setCustomerName(source, name) {
+    function setClientProfile(source, fields) {
       const k = customerKey(source);
       if (!k) return;
-      const trimmed = (name || '').trim();
       setData(d => {
-        const next = { ...d, customerNames: { ...(d.customerNames || {}) } };
-        if (trimmed) next.customerNames[k] = trimmed;
-        else delete next.customerNames[k];
-        return next;
+        const clients = { ...(d.clients || {}) };
+        const prev = clients[k] || { name: '', business: '', phone: '' };
+        const next = {
+          name:     ((fields.name     != null ? fields.name     : prev.name)     || '').trim(),
+          business: ((fields.business != null ? fields.business : prev.business) || '').trim(),
+          phone:    ((fields.phone    != null ? fields.phone    : prev.phone)    || '').trim()
+        };
+        if (!next.name && !next.business && !next.phone) delete clients[k];
+        else clients[k] = next;
+        return { ...d, clients };
       });
+    }
+    // Back-compat shim — older call sites set just a name.
+    function setCustomerName(source, name) {
+      setClientProfile(source, { name: name || '' });
     }
 
     function aggregateCustomers(income) {
@@ -2494,8 +2683,12 @@
       // (table, donut, tiles, what-changed feed) can use a single field.
       const out = [...map.values()];
       for (const c of out) {
-        c.displayName  = (state.data.customerNames && state.data.customerNames[c.key]) || '';
-        c.displayLabel = c.displayName || c.label;
+        const p = (state.data.clients && state.data.clients[c.key]) || { name: '', business: '', phone: '' };
+        c.name = p.name || '';
+        c.business = p.business || '';
+        c.phone = p.phone || '';
+        c.displayName  = c.name;
+        c.displayLabel = c.name || c.business || c.label;
       }
       return out;
     }
@@ -2550,7 +2743,7 @@
             <span>${esc(label)}</span>
             ${opts.pill || ''}
           </div>
-          <div class="text-2xl font-medium tabular-nums font-mono ${opts.color || 'text-stone-900'}" style="${opts.style || ''}">${primary}</div>
+          <div data-fit="${opts.fit || 24}" data-fit-min="13" class="font-medium tabular-nums font-mono ${opts.color || 'text-stone-900'}" style="white-space:nowrap;overflow:hidden;${opts.style || ''}">${primary}</div>
           ${secondary ? `<div class="text-xs text-stone-500 mt-1">${secondary}</div>` : ''}
         </div>`;
 
@@ -2564,7 +2757,7 @@
         s.biggest
           ? `${esc(fmt(s.biggest.net, cur))} · ${s.biggestShare.toFixed(1)}% of revenue`
           : 'no positive payments yet',
-        { pill: concentrationPill, color: 'text-stone-900', style: 'font-size: 17px;' }
+        { pill: concentrationPill, color: 'text-stone-900', fit: 17 }
       );
 
       const avgMedTile = `
@@ -2671,26 +2864,35 @@
           : `<span class="text-stone-500">—</span>`;
 
         const editing = state.editingCustomerKey === c.key;
+        const hasProfile = !!(c.name || c.business || c.phone);
         const nameCell = editing ? `
-          <div data-customer-edit-row="${attr(c.key)}" class="flex items-center gap-2">
-            <input type="text" data-field="customerName" value="${attr(c.displayName || '')}" autofocus
-              placeholder="${attr(c.label)}"
-              class="flex-1 min-w-0 px-3 py-1.5 text-sm rounded-xl bg-white" style="${shadowField}" />
-            <button data-action="save-customer-name" data-key="${attr(c.key)}"
-              class="px-2 py-1.5 rounded-xl text-xs" style="background-color: var(--accent); color: var(--bg);">Save</button>
-            ${c.displayName ? `<button data-action="clear-customer-name" data-key="${attr(c.key)}"
-              class="px-2 py-1.5 rounded-xl text-xs" style="background-color: var(--surface-2); color: var(--text-muted);">Clear</button>` : ''}
-            <button data-action="cancel-edit-customer"
-              class="px-2 py-1.5 rounded-xl text-xs" style="background-color: var(--surface-2); color: var(--text-muted);">Cancel</button>
+          <div data-customer-edit-row="${attr(c.key)}" class="flex flex-col gap-1.5 min-w-[220px]">
+            <input type="text" data-field="clientName" value="${attr(c.name || '')}" autofocus placeholder="Name"
+              class="px-3 py-1.5 text-sm rounded-xl bg-white" style="${shadowField}" />
+            <input type="text" data-field="clientBusiness" value="${attr(c.business || '')}" placeholder="Business"
+              class="px-3 py-1.5 text-sm rounded-xl bg-white" style="${shadowField}" />
+            <input type="text" data-field="clientPhone" value="${attr(c.phone || '')}" placeholder="Phone"
+              class="px-3 py-1.5 text-sm rounded-xl bg-white" style="${shadowField}" />
+            <div class="text-[11px] text-stone-400 truncate" title="${attr(c.label)}">${esc(c.label)}</div>
+            <div class="flex gap-2 pt-0.5">
+              <button data-action="save-customer-name" data-key="${attr(c.key)}"
+                class="px-2.5 py-1.5 rounded-xl text-xs" style="background-color: var(--accent); color: var(--bg);">Save</button>
+              ${hasProfile ? `<button data-action="clear-customer-name" data-key="${attr(c.key)}"
+                class="px-2.5 py-1.5 rounded-xl text-xs" style="background-color: var(--surface-2); color: var(--text-muted);">Clear</button>` : ''}
+              <button data-action="cancel-edit-customer"
+                class="px-2.5 py-1.5 rounded-xl text-xs" style="background-color: var(--surface-2); color: var(--text-muted);">Cancel</button>
+            </div>
           </div>
         ` : `
           <div class="group/row flex items-start gap-2">
             <div class="flex-1 min-w-0">
               <div class="truncate max-w-[260px] text-stone-900" title="${attr(c.label)}">${esc(c.displayLabel || c.label)}</div>
-              ${c.displayName ? `<div class="truncate max-w-[260px] text-[11px] text-stone-500" title="${attr(c.label)}">${esc(c.label)}</div>` : ''}
+              ${c.business ? `<div class="truncate max-w-[260px] text-[11px] text-stone-500">${esc(c.business)}</div>` : ''}
+              ${c.phone ? `<div class="truncate max-w-[260px] text-[11px] text-stone-500">${esc(c.phone)}</div>` : ''}
+              ${(c.name || c.business) ? `<div class="truncate max-w-[260px] text-[11px] text-stone-400" title="${attr(c.label)}">${esc(c.label)}</div>` : ''}
             </div>
             <button data-action="start-edit-customer" data-key="${attr(c.key)}"
-              title="Set a friendly name for this customer"
+              title="Edit client profile"
               class="p-1.5 rounded-lg text-stone-500 hover:text-stone-900 transition-colors flex-shrink-0"
               style="background-color: transparent;">${icon('pencil', 13)}</button>
           </div>
@@ -2707,12 +2909,12 @@
       }).join('');
 
       const table = customers.length === 0
-        ? `<div class="p-14 text-center text-stone-500 text-sm">No customers yet — log some income first.</div>`
+        ? `<div class="p-14 text-center text-stone-500 text-sm">No clients yet — log some income first.</div>`
         : `<div class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
               <tr class="text-[11px] tracking-[0.1em] uppercase text-stone-500" style="border-bottom: 1px solid var(--border);">
-                ${sortHeader('label', 'Customer')}
+                ${sortHeader('label', 'Client')}
                 ${sortHeader('lifetimeGross', 'Lifetime gross', 'right')}
                 <th class="text-right font-medium px-4 md:px-6 py-4 hidden md:table-cell whitespace-nowrap cursor-pointer hover:text-stone-900 transition-colors" data-action="sort-customers" data-field="refunded">Refunded${arrow('refunded')}</th>
                 ${sortHeader('net', 'Net', 'right')}
@@ -2798,9 +3000,15 @@
         base.category = readField(form, 'category') || '';
         const gstEl = form.querySelector('[data-field="gstInclusive"]');
         if (gstEl) base.gstInclusive = gstEl.checked;
+      } else {
+        base.category = (readField(form, 'category') || '').trim();
       }
       const entry = stamp(base);
-      setData(d => ({ ...d, [M.listKey]: [...d[M.listKey], entry] }));
+      setData(d => ({
+        ...d,
+        [M.listKey]: [...d[M.listKey], entry],
+        ...(kind === 'income' ? { incomeCategories: withIncomeCategory(d.incomeCategories, base.category) } : {})
+      }));
     }
 
     function actSaveEdit(kind, id) {
@@ -2814,7 +3022,12 @@
         notes: readField(row, 'notes') || ''
       };
       if (kind === 'expense') patch.category = readField(row, 'category') || '';
-      setData(d => ({ ...d, [M.listKey]: d[M.listKey].map(x => x.id === id ? stamp({ ...x, ...patch }) : x) }));
+      else patch.category = (readField(row, 'category') || '').trim();
+      setData(d => ({
+        ...d,
+        [M.listKey]: d[M.listKey].map(x => x.id === id ? stamp({ ...x, ...patch }) : x),
+        ...(kind === 'income' ? { incomeCategories: withIncomeCategory(d.incomeCategories, patch.category) } : {})
+      }));
       state.editingId = null;
     }
 
@@ -2843,8 +3056,11 @@
         headers = ['Vendor', 'Category', 'Date', 'Amount', 'GST Inclusive', 'Notes', 'Edited By', 'Edited At'];
         rows = filtered.map(x => [x.vendor, x.category || '', x.date, parseAmount(x.amount).toFixed(2), x.gstInclusive ? 'yes' : '', x.notes || '', x.editedBy || '', x.editedAt || '']);
       } else {
-        headers = ['Source', 'Display Name', 'Date', 'Amount', 'Notes', 'Edited By', 'Edited At'];
-        rows = filtered.map(x => [x.source, customerDisplayName(x.source), x.date, parseAmount(x.amount).toFixed(2), x.notes || '', x.editedBy || '', x.editedAt || '']);
+        headers = ['Source', 'Client', 'Business', 'Phone', 'Category', 'Date', 'Amount', 'Notes', 'Edited By', 'Edited At'];
+        rows = filtered.map(x => {
+          const p = clientProfile(x.source);
+          return [x.source, p.name || '', p.business || '', p.phone || '', x.category || '', x.date, parseAmount(x.amount).toFixed(2), x.notes || '', x.editedBy || '', x.editedAt || ''];
+        });
       }
       const suffix = filter === 'all' ? 'all' : filter;
       download(`ventra-${M.listKey}-${suffix}.csv`, toCSV(rows, headers), 'text/csv');
@@ -2856,6 +3072,7 @@
       const rows = parseCSV(text);
       if (rows.length === 0) return;
       const M = ledgerMeta(kind);
+      const profileUpdates = [];
       const imported = rows.map(r => {
         const name = r[M.nameField] || r[M.nameLabel.toLowerCase()] || r.charge || r.vendor || r.source || r.name || '';
         const date = parseFlexDate(r['date charged'] || r.date || '');
@@ -2866,10 +3083,36 @@
           const cat = r.category || '';
           base.category = EXPENSE_CATEGORIES.includes(cat) ? cat : (cat ? 'Other' : '');
           base.gstInclusive = /^(yes|true|1|y)$/i.test(r['gst inclusive'] || r.gst || '');
+        } else {
+          base.category = (r.category || '').trim();
+          const cName = (r.client || r['display name'] || '').trim();
+          const cBiz = (r.business || '').trim();
+          const cPhone = (r.phone || r.number || '').trim();
+          if (name && (cName || cBiz || cPhone)) profileUpdates.push({ source: name, name: cName, business: cBiz, phone: cPhone });
         }
         return stamp(base);
       }).filter(x => x[M.nameField] && x.amount);
-      setData(d => ({ ...d, [M.listKey]: [...d[M.listKey], ...imported] }));
+      setData(d => {
+        const next = { ...d, [M.listKey]: [...d[M.listKey], ...imported] };
+        if (kind === 'income') {
+          let cats = [...(d.incomeCategories || [])];
+          imported.forEach(x => { cats = withIncomeCategory(cats, x.category); });
+          next.incomeCategories = cats;
+          const clients = { ...(d.clients || {}) };
+          profileUpdates.forEach(u => {
+            const k = customerKey(u.source);
+            if (!k) return;
+            const prev = clients[k] || { name: '', business: '', phone: '' };
+            clients[k] = {
+              name: u.name || prev.name,
+              business: u.business || prev.business,
+              phone: u.phone || prev.phone
+            };
+          });
+          next.clients = clients;
+        }
+        return next;
+      });
       alert(`Imported ${imported.length} ${kind} ${imported.length === 1 ? 'entry' : 'entries'}.`);
     }
     // ============ Uncollected ============
@@ -3196,17 +3439,17 @@
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
           ${card(`
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Income</div>
-            <div class="text-[28px] font-medium text-stone-900 tabular-nums font-mono">${esc(fmt(totalIncome, currency))}</div>
+            <div data-fit="30" data-fit-min="15" class="font-medium text-stone-900 tabular-nums font-mono" style="white-space:nowrap;overflow:hidden;">${esc(fmt(totalIncome, currency))}</div>
             <div class="text-xs text-stone-500 mt-1">${fyIncome.length} entries</div>
           `, 'p-5')}
           ${card(`
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-500 mb-2">Expenses</div>
-            <div class="text-[28px] font-medium text-stone-900 tabular-nums font-mono">${esc(fmt(totalExpenses, currency))}</div>
+            <div data-fit="30" data-fit-min="15" class="font-medium text-stone-900 tabular-nums font-mono" style="white-space:nowrap;overflow:hidden;">${esc(fmt(totalExpenses, currency))}</div>
             <div class="text-xs text-stone-500 mt-1">${fyExpenses.length} charges</div>
           `, 'p-5')}
           ${card(`
             <div class="text-[11px] tracking-[0.1em] uppercase text-stone-400 mb-2">Net profit</div>
-            <div class="text-[28px] font-medium tabular-nums font-mono ${net >= 0 ? 'text-stone-50' : 'text-red-300'}">${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), currency))}</div>
+            <div data-fit="30" data-fit-min="15" class="font-medium tabular-nums font-mono ${net >= 0 ? 'text-stone-50' : 'text-red-300'}" style="white-space:nowrap;overflow:hidden;">${net >= 0 ? '' : '-'}${esc(fmt(Math.abs(net), currency))}</div>
             <div class="text-xs text-stone-400 mt-1">Before tax</div>
           `, 'p-5', 'background: linear-gradient(135deg, rgba(200,184,239,0.10) 0%, rgba(200,184,239,0.02) 100%), var(--surface-raised); box-shadow: inset 0 0 0 1px rgba(200,184,239,0.18), var(--shadow-card);')}
         </div>`;
@@ -3224,7 +3467,7 @@
             <div class="rounded-2xl p-4" style="background-color:var(--surface-2);">
               <div class="text-sm font-medium text-stone-900">${esc(p.name)}</div>
               <div class="text-[11px] text-stone-500 mb-2">${p.pct}% share</div>
-              <div class="text-xl font-medium tabular-nums font-mono ${p.share >= 0 ? 'text-stone-900' : 'text-red-700'}">
+              <div data-fit="22" data-fit-min="13" class="font-medium tabular-nums font-mono ${p.share >= 0 ? 'text-stone-900' : 'text-red-700'}" style="white-space:nowrap;overflow:hidden;">
                 ${p.share >= 0 ? '' : '-'}${esc(fmt(Math.abs(p.share), currency))}
               </div>
             </div>`).join('')}
@@ -3844,8 +4087,8 @@
 
         // 01 — Income CSV
         zip.file('01-income.csv', toCSVWithBOM(
-          fyIncome.map(i => [i.source || '', customerDisplayName(i.source), i.date, parseAmount(i.amount).toFixed(2), i.notes || '', i.editedBy || '', i.editedAt || '']),
-          ['Source', 'Display Name', 'Date', 'Amount', 'Notes', 'Edited by', 'Edited at']
+          fyIncome.map(i => { const p = clientProfile(i.source); return [i.source || '', p.name || '', p.business || '', p.phone || '', i.category || '', i.date, parseAmount(i.amount).toFixed(2), i.notes || '', i.editedBy || '', i.editedAt || '']; }),
+          ['Source', 'Client', 'Business', 'Phone', 'Category', 'Date', 'Amount', 'Notes', 'Edited by', 'Edited at']
         ));
 
         // 02 — Expenses all
@@ -4360,7 +4603,7 @@
     // ============ Charts (Chart.js — inlined at end of body) ============
     // Palette, all from existing theme tokens. Cap at 6 colours per chart;
     // anything beyond rolls into "Everyone else" using the muted neutral.
-    const CHART_PALETTE = [
+    const PALETTE_DARK = [
       '#c8b8ef', // accent (lavender)
       '#a3c9a3', // income (sage)
       '#e6e1d7', // cream (champagne)
@@ -4368,6 +4611,18 @@
       '#8d7fb1', // accent-dim
       '#6b6a68'  // text-faint — used for "Everyone else"
     ];
+    const PALETTE_LIGHT = [
+      '#7c5fd3', // deeper lavender
+      '#3f8f5f', // sage green
+      '#c79a45', // gold/champagne
+      '#bd6a52', // terracotta
+      '#9a86c9', // soft violet
+      '#a6a29b'  // neutral — "Everyone else"
+    ];
+    let CHART_PALETTE = (function () {
+      try { return localStorage.getItem('ventra-ledger-theme') === 'light' ? PALETTE_LIGHT : PALETTE_DARK; }
+      catch (e) { return PALETTE_DARK; }
+    })();
     const REDUCED_MOTION = window.matchMedia
       ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
       : false;
@@ -4460,33 +4715,71 @@
       </table>`;
     }
 
-    const CHART_SURFACE_BORDER = '#1d1f23'; // var(--surface) for slice gaps
+    const CHART_SURFACE_BORDER = 'var(--surface)'; // slice/segment gaps match the card
 
     // ---- Inline SVG chart renderers ---------------------------------------
     // These replace Chart.js canvases. Each returns an HTML string that the
     // view injects directly, so the charts are plain DOM that rebuilds with
     // every render() and always reflects the active period. No canvas, no
     // chart instances, nothing to leave stale.
+    // ---- Axis helpers -----------------------------------------------------
+    function _niceNum(range, round) {
+      if (range <= 0) return 1;
+      const exp = Math.floor(Math.log10(range));
+      const f = range / Math.pow(10, exp);
+      let nf;
+      if (round) nf = f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10;
+      else       nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+      return nf * Math.pow(10, exp);
+    }
+    // Returns an array of "nice" tick values spanning [lo, hi].
+    function niceTicks(lo, hi, count = 4) {
+      if (!isFinite(lo) || !isFinite(hi) || lo === hi) { lo = Math.min(0, lo || 0); hi = (hi || 0) + 1; }
+      const range = _niceNum(hi - lo, false);
+      const step = _niceNum(range / Math.max(1, count - 1), true);
+      const niceLo = Math.floor(lo / step) * step;
+      const niceHi = Math.ceil(hi / step) * step;
+      const ticks = [];
+      for (let v = niceLo; v <= niceHi + step * 0.5; v += step) ticks.push(Math.round(v * 100) / 100);
+      return ticks;
+    }
+    // Compact axis/center label: $1.2k, $3M, -$450
+    function fmtAxis(v, cur) {
+      const a = Math.abs(v);
+      const sym = (cur === 'USD' || cur === 'AUD' || cur === 'NZD') ? '$' : cur === 'GBP' ? '£' : cur === 'EUR' ? '€' : '';
+      const neg = v < 0 ? '-' : '';
+      let s;
+      if (a >= 1e6) s = (a / 1e6).toFixed(a % 1e6 ? 1 : 0) + 'M';
+      else if (a >= 1e3) s = (a / 1e3).toFixed(a >= 1e4 || a % 1e3 === 0 ? 0 : 1) + 'k';
+      else s = String(Math.round(a));
+      return neg + sym + s;
+    }
+
     function svgDonut({ labels, values, colors, cur, total }) {
-      const R = 54, SW = 22, C = 2 * Math.PI * R;
+      const R = 56, SW = 17, C = 2 * Math.PI * R;
+      const realSegs = values.filter(v => v > 0).length;
+      const gap = realSegs > 1 ? 0.012 : 0; // tiny breathing gap between slices
       let acc = 0;
       const rings = values.map((v, i) => {
         const frac = total > 0 ? v / total : 0;
-        const dash = Math.max(0, frac * C);
-        const seg = `<circle cx="72" cy="72" r="${R}" fill="none" stroke="${colors[i]}" stroke-width="${SW}" stroke-dasharray="${dash.toFixed(2)} ${(C - dash).toFixed(2)}" stroke-dashoffset="${(-acc * C).toFixed(2)}" transform="rotate(-90 72 72)"></circle>`;
+        const pct = total > 0 ? (v / total) * 100 : 0;
+        const dash = Math.max(0, (frac - gap) * C);
+        const seg = `<circle cx="72" cy="72" r="${R}" fill="none" stroke="${colors[i]}" stroke-width="${SW}" stroke-dasharray="${dash.toFixed(2)} ${(C - dash).toFixed(2)}" stroke-dashoffset="${(-acc * C).toFixed(2)}" transform="rotate(-90 72 72)" style="pointer-events:stroke;cursor:default;" data-tip="<b>${attr(labels[i])}</b><br>${attr(fmt(values[i], cur))} · ${pct.toFixed(1)}%"></circle>`;
         acc += frac;
         return seg;
       }).join('');
+      const center = `<text x="72" y="68" text-anchor="middle" font-size="9" letter-spacing="0.06em" fill="var(--text-faint)" font-family="'DM Sans',sans-serif">TOTAL</text>
+        <text x="72" y="85" text-anchor="middle" font-size="16" font-weight="600" fill="var(--text)" font-family="'JetBrains Mono',monospace">${esc(fmtAxis(total, cur))}</text>`;
       const legend = labels.map((l, i) => {
         const pct = total > 0 ? (values[i] / total) * 100 : 0;
         return `<li style="display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px;line-height:1.3;">
-          <span style="width:10px;height:10px;border-radius:2px;background:${colors[i]};flex:none;"></span>
+          <span style="width:9px;height:9px;border-radius:2px;background:${colors[i]};flex:none;"></span>
           <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(l)}</span>
-          <span style="color:#9c9a97;font-variant-numeric:tabular-nums;white-space:nowrap;">${fmt(values[i], cur)} · ${pct.toFixed(0)}%</span>
+          <span style="color:var(--text-muted);font-variant-numeric:tabular-nums;white-space:nowrap;font-family:'JetBrains Mono',monospace;font-size:11px;">${fmt(values[i], cur)} · ${pct.toFixed(0)}%</span>
         </li>`;
       }).join('');
-      return `<div style="height:100%;display:flex;align-items:center;justify-content:center;gap:18px;flex-wrap:wrap;">
-        <svg viewBox="0 0 144 144" width="150" height="150" style="flex:none;max-width:46%;min-width:118px;">${rings}</svg>
+      return `<div style="height:100%;display:flex;align-items:center;justify-content:center;gap:22px;flex-wrap:wrap;">
+        <svg viewBox="0 0 144 144" width="150" height="150" style="flex:none;max-width:46%;min-width:118px;">${rings}${center}</svg>
         <ul style="list-style:none;margin:0;padding:0;flex:1;min-width:168px;">${legend}</ul>
       </div>`;
     }
@@ -4494,51 +4787,123 @@
     function svgStackedBars({ labels, cats, matrix, colors, cur }) {
       const totals = matrix.map(row => cats.reduce((s, c) => s + (row[c] || 0), 0));
       const maxTotal = Math.max(1, ...totals);
+      const ticks = niceTicks(0, maxTotal, 4);
+      const axisMax = ticks[ticks.length - 1] || maxTotal;
       const n = labels.length;
-      const W = 340, padL = 38, padR = 6, rowH = 20, gap = 12, padT = 4;
+      const W = 360, padL = 40, padR = 12, rowH = 18, gap = 13, padT = 6, padB = 20;
       const barW = W - padL - padR;
-      const H = padT * 2 + n * rowH + (n - 1) * gap;
+      const plotBottom = padT + n * rowH + (n - 1) * gap;
+      const H = plotBottom + padB;
+      const grid = ticks.map(t => {
+        const x = padL + (t / axisMax) * barW;
+        return `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${plotBottom.toFixed(1)}" stroke="var(--grid)" stroke-width="1"></line>
+          <text x="${x.toFixed(1)}" y="${(plotBottom + 13).toFixed(1)}" text-anchor="middle" font-size="9" fill="var(--text-faint)">${fmtAxis(t, cur)}</text>`;
+      }).join('');
       let rows = '';
       labels.forEach((lab, i) => {
         const y = padT + i * (rowH + gap);
         let x = padL, seg = '';
         cats.forEach((c, ci) => {
           const v = matrix[i][c] || 0;
-          const w = (v / maxTotal) * barW;
-          if (w > 0.4) seg += `<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="${rowH}" rx="2" fill="${colors[ci]}"></rect>`;
+          const w = (v / axisMax) * barW;
+          if (w > 0.4) seg += `<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="${rowH}" rx="2.5" fill="${colors[ci]}" style="cursor:default;" data-tip="<b>${attr(c)}</b> · ${attr(lab)}<br>${attr(fmt(v, cur))}"></rect>`;
           x += w;
         });
-        rows += `<text x="${padL - 7}" y="${y + rowH / 2 + 4}" text-anchor="end" font-size="11" fill="#9c9a97">${esc(lab)}</text>${seg}`;
+        rows += `<text x="${padL - 8}" y="${y + rowH / 2 + 4}" text-anchor="end" font-size="11" fill="var(--text-muted)">${esc(lab)}</text>${seg}`;
       });
-      const legend = cats.map((c, ci) => `<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#cfccc6;margin:0 12px 4px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${colors[ci]};flex:none;"></span>${esc(c)}</span>`).join('');
+      const legend = cats.map((c, ci) => `<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin:0 12px 4px 0;"><span style="width:10px;height:10px;border-radius:2px;background:${colors[ci]};flex:none;"></span>${esc(c)}</span>`).join('');
       return `<div style="height:100%;display:flex;flex-direction:column;justify-content:center;gap:10px;">
-        <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;max-height:100%;" preserveAspectRatio="xMidYMid meet">${rows}</svg>
+        <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;max-height:100%;" preserveAspectRatio="xMidYMid meet">${grid}${rows}</svg>
         <div style="display:flex;flex-wrap:wrap;">${legend}</div>
       </div>`;
     }
 
     function svgLine({ labels, values, cur }) {
-      const W = 340, H = 150, padL = 30, padR = 8, padT = 12, padB = 22;
+      const W = 360, H = 172, padL = 50, padR = 12, padT = 14, padB = 26;
       const n = values.length;
       const iw = W - padL - padR, ih = H - padT - padB;
       const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
-      const range = (hi - lo) || 1;
+      const ticks = niceTicks(lo, hi, 4);
+      const tlo = ticks[0], thi = ticks[ticks.length - 1];
+      const range = (thi - tlo) || 1;
       const X = i => padL + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
-      const Y = v => padT + (1 - (v - lo) / range) * ih;
+      const Y = v => padT + (1 - (v - tlo) / range) * ih;
+      const grid = ticks.map(t => {
+        const y = Y(t);
+        return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--grid)" stroke-width="1"></line>
+          <text x="${padL - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="9.5" fill="var(--text-faint)">${fmtAxis(t, cur)}</text>`;
+      }).join('');
       const zeroY = Y(0);
       const pts = values.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`);
-      const area = n > 1 ? `<polygon fill="rgba(163,201,163,0.16)" points="${X(0).toFixed(1)},${zeroY.toFixed(1)} ${pts.join(' ')} ${X(n - 1).toFixed(1)},${zeroY.toFixed(1)}"></polygon>` : '';
-      const line = `<polyline fill="none" stroke="#a3c9a3" stroke-width="2" stroke-linejoin="round" points="${pts.join(' ')}"></polyline>`;
-      const dots = values.map((v, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="3" fill="#a3c9a3" stroke="#1d1f23" stroke-width="1.5"></circle>`).join('');
-      const xlabels = labels.map((l, i) => `<text x="${X(i).toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="10" fill="#6b6a68">${esc(l)}</text>`).join('');
-      const zero = `<line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W - padR}" y2="${zeroY.toFixed(1)}" stroke="rgba(255,255,255,0.08)" stroke-width="1"></line>`;
+      const area = n > 1 ? `<polygon fill="var(--income)" fill-opacity="0.13" points="${X(0).toFixed(1)},${zeroY.toFixed(1)} ${pts.join(' ')} ${X(n - 1).toFixed(1)},${zeroY.toFixed(1)}"></polygon>` : '';
+      const line = `<polyline fill="none" stroke="var(--income)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${pts.join(' ')}"></polyline>`;
+      const dots = values.map((v, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="10" fill="transparent" style="cursor:default;" data-tip="<b>${attr(labels[i])}</b><br>${attr(fmt(v, cur))}"></circle><circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="3.2" fill="var(--income)" stroke="var(--surface)" stroke-width="1.5" pointer-events="none"></circle>`).join('');
+      const xlabels = labels.map((l, i) => `<text x="${X(i).toFixed(1)}" y="${H - 7}" text-anchor="middle" font-size="10" fill="var(--text-faint)">${esc(l)}</text>`).join('');
+      const zero = (tlo < 0 && thi > 0) ? `<line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W - padR}" y2="${zeroY.toFixed(1)}" stroke="var(--border-strong)" stroke-width="1.2"></line>` : '';
       return `<div style="height:100%;display:flex;align-items:center;">
-        <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;max-height:100%;" preserveAspectRatio="xMidYMid meet">${zero}${area}${line}${dots}${xlabels}</svg>
+        <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;max-height:100%;" preserveAspectRatio="xMidYMid meet">${grid}${zero}${area}${line}${dots}${xlabels}</svg>
+      </div>`;
+    }
+
+    // Grouped income vs expense bars per month, with value axis + gridlines.
+    function svgCashflow({ buckets, cur }) {
+      const n = buckets.length;
+      const maxV = Math.max(1, ...buckets.map(b => Math.max(b.inc, b.e)));
+      const ticks = niceTicks(0, maxV, 4);
+      const axisMax = ticks[ticks.length - 1] || maxV;
+      const W = 580, H = 230, padL = 52, padR = 14, padT = 12, padB = 30;
+      const iw = W - padL - padR, ih = H - padT - padB;
+      const groupW = iw / n;
+      const barW = Math.max(6, Math.min(20, groupW * 0.30));
+      const baseY = padT + ih;
+      const grid = ticks.map(t => {
+        const y = padT + (1 - t / axisMax) * ih;
+        return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--grid)" stroke-width="1"></line>
+          <text x="${padL - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--text-faint)">${fmtAxis(t, cur)}</text>`;
+      }).join('');
+      let bars = '';
+      buckets.forEach((b, i) => {
+        const cx = padL + groupW * i + groupW / 2;
+        const incH = (b.inc / axisMax) * ih, expH = (b.e / axisMax) * ih;
+        const x1 = cx - barW - 1.5, x2 = cx + 1.5;
+        bars += `<rect x="${x1.toFixed(1)}" y="${(baseY - incH).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0, incH).toFixed(1)}" rx="3" fill="var(--income)" style="cursor:default;" data-tip="<b>Income</b> · ${attr(b.label)}<br>${attr(fmt(b.inc, cur))}"></rect>`;
+        bars += `<rect x="${x2.toFixed(1)}" y="${(baseY - expH).toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0, expH).toFixed(1)}" rx="3" fill="var(--expense)" style="cursor:default;" data-tip="<b>Expenses</b> · ${attr(b.label)}<br>${attr(fmt(b.e, cur))}"></rect>`;
+        bars += `<text x="${cx.toFixed(1)}" y="${H - 10}" text-anchor="middle" font-size="10.5" fill="${b.active ? 'var(--text)' : 'var(--text-faint)'}" font-weight="${b.active ? '600' : '400'}">${esc(b.label)}</text>`;
+      });
+      return `<div style="height:100%;display:flex;align-items:center;">
+        <svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;max-height:100%;" preserveAspectRatio="xMidYMid meet">${grid}${bars}</svg>
       </div>`;
     }
 
     function svgChartEmpty(msg) {
-      return `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#6b6a68;font-size:13px;">${esc(msg || 'No data for this period')}</div>`;
+      return `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:var(--text-faint);font-size:13px;">${esc(msg || 'No data for this period')}</div>`;
+    }
+
+    // ---- Shared chart tooltip ---------------------------------------------
+    let _chartTip = null;
+    function _getChartTip() {
+      if (_chartTip) return _chartTip;
+      const el = document.createElement('div');
+      el.id = 'chart-tip';
+      el.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;opacity:0;transition:opacity 110ms ease;background:var(--surface-raised);color:var(--text);font:500 12px/1.45 "DM Sans",system-ui,sans-serif;padding:8px 11px;border-radius:10px;box-shadow:var(--shadow-pop);white-space:nowrap;transform:translate(-50%,calc(-100% - 12px));';
+      document.body.appendChild(el);
+      _chartTip = el;
+      return el;
+    }
+    function initChartTooltips() {
+      document.addEventListener('mousemove', (e) => {
+        const t = e.target;
+        const seg = (t && t.closest) ? t.closest('[data-tip]') : null;
+        if (!seg) { if (_chartTip) _chartTip.style.opacity = '0'; return; }
+        const tip = _getChartTip();
+        tip.innerHTML = seg.getAttribute('data-tip');
+        tip.style.left = e.clientX + 'px';
+        tip.style.top = e.clientY + 'px';
+        tip.style.opacity = '1';
+      }, { passive: true });
+      document.addEventListener('mouseout', (e) => {
+        if (!e.relatedTarget && _chartTip) _chartTip.style.opacity = '0';
+      });
     }
 
     const CHART_BUILDERS = {
@@ -4583,6 +4948,57 @@
           );
         }
         return svgLine({ labels, values: data, cur });
+      },
+
+      // 2b. Cash-flow — income vs expenses grouped bars over the trend window.
+      'cashflow': (canvas) => {
+        const cur = state.data.settings.currency;
+        const buckets = trendBuckets(); // [{ label, e, inc, active }]
+        if (!buckets.some(b => b.e > 0 || b.inc > 0)) return null;
+        const srHost = document.getElementById(canvas.dataset.srTarget);
+        if (srHost) {
+          srHost.innerHTML = srSummaryTable(canvas.id + '-tbl',
+            'Income versus expenses by month',
+            ['Month', 'Income', 'Expenses'],
+            buckets.map(b => [b.label, fmt(b.inc, cur), fmt(b.e, cur)])
+          );
+        }
+        return svgCashflow({ buckets, cur });
+      },
+
+      // Income by category — top 5 categories of positive income in active period.
+      'income-category': (canvas) => {
+        const cur = state.data.settings.currency;
+        const inP = (iso) => {
+          if (state.period === 'month')   return monthKey(iso) === state.currentMonth;
+          if (state.period === 'quarter') return isoInQuarter(iso, state.currentQuarter);
+          return isoInFY(iso, state.currentFY);
+        };
+        const m = new Map();
+        for (const e of state.data.income) {
+          const amt = parseAmount(e.amount);
+          if (amt <= 0) continue;
+          if (!inP(e.date)) continue;
+          const cat = (e.category || '').trim() || 'Uncategorised';
+          m.set(cat, (m.get(cat) || 0) + amt);
+        }
+        const all = [...m.entries()].map(([label, total]) => ({ label, total }));
+        if (!all.length) return null;
+        all.sort((a, b) => b.total - a.total);
+        const { top, restSum } = topNWithRest(all, 'total', 5);
+        const labels = [...top.map(v => v.label), ...(restSum > 0 ? ['Everyone else'] : [])];
+        const data   = [...top.map(v => v.total),  ...(restSum > 0 ? [restSum] : [])];
+        const colors = labels.map((_, i) => CHART_PALETTE[Math.min(i, 5)]);
+        const total  = data.reduce((a, b) => a + b, 0);
+        const srHost = document.getElementById(canvas.dataset.srTarget);
+        if (srHost) {
+          srHost.innerHTML = srSummaryTable(canvas.id + '-tbl',
+            `Income by category ${state.period === 'month' ? 'this month' : 'this ' + state.period}`,
+            ['Category', 'Total', '% of income'],
+            data.map((v, i) => [labels[i], fmt(v, cur), `${((v / total) * 100).toFixed(1)}%`])
+          );
+        }
+        return svgDonut({ labels, values: data, colors, cur, total });
       },
 
       // 3. Vendor concentration donut — top 5 vendors in active period.
@@ -4801,6 +5217,7 @@
         for (const { chart } of _charts.values()) {
           try { chart.resize(); } catch {}
         }
+        if (typeof fitText === 'function') fitText();
       }, 120);
     });
 
@@ -4824,6 +5241,22 @@
 
       // Build fresh charts for whatever canvases this view rendered.
       ensureCharts();
+
+      // Auto-fit large tabular numbers so currency never clips its card.
+      fitText();
+    }
+
+    // Shrink any [data-fit] element's font-size until its text fits on one line.
+    function fitText() {
+      document.querySelectorAll('[data-fit]').forEach(el => {
+        const max = parseFloat(el.dataset.fit) || 30;
+        const min = parseFloat(el.dataset.fitMin) || 15;
+        el.style.fontSize = max + 'px';
+        let size = max, guard = 0;
+        while (el.scrollWidth > el.clientWidth + 0.5 && size > min && guard < 60) {
+          size -= 1; el.style.fontSize = size + 'px'; guard++;
+        }
+      });
     }
 
     // ============ Dropdown open/close (DOM-driven) ============
@@ -4859,6 +5292,13 @@
     });
 
     function dispatch(action, el) {
+      // Theme toggle (per-device)
+      if (action === 'toggle-theme') {
+        state.theme = state.theme === 'light' ? 'dark' : 'light';
+        setTheme(state.theme);
+        return render();
+      }
+
       // Tab navigation
       if (action === 'tab') {
         state.tab = el.dataset.tab;
@@ -5003,17 +5443,15 @@
       if (action === 'save-customer-name') {
         const key = el.dataset.key;
         const row = document.querySelector(`[data-customer-edit-row="${CSS.escape(key)}"]`);
-        const input = row && row.querySelector('[data-field="customerName"]');
-        const name = input ? input.value : '';
+        const get = (f) => { const i = row && row.querySelector(`[data-field="${f}"]`); return i ? i.value : ''; };
         state.editingCustomerKey = null;
-        // setCustomerName triggers setData → render. No additional render call needed.
-        if (name.trim()) setCustomerName(key, name);
-        else { setCustomerName(key, ''); }   // empty input clears the override
+        // setClientProfile triggers setData → render. No additional render call needed.
+        setClientProfile(key, { name: get('clientName'), business: get('clientBusiness'), phone: get('clientPhone') });
         return;
       }
       if (action === 'clear-customer-name') {
         state.editingCustomerKey = null;
-        setCustomerName(el.dataset.key, '');
+        setClientProfile(el.dataset.key, { name: '', business: '', phone: '' });
         return;
       }
 
@@ -5159,10 +5597,9 @@
       if (editRow) {
         e.preventDefault();
         const key = editRow.dataset.customerEditRow;
-        const input = editRow.querySelector('[data-field="customerName"]');
-        const name = input ? input.value : '';
+        const get = (f) => { const i = editRow.querySelector(`[data-field="${f}"]`); return i ? i.value : ''; };
         state.editingCustomerKey = null;
-        setCustomerName(key, name.trim());  // setData → render
+        setClientProfile(key, { name: get('clientName'), business: get('clientBusiness'), phone: get('clientPhone') });
         return;
       }
       const form = e.target.closest && e.target.closest('[data-add-form]');
@@ -5182,7 +5619,11 @@
     });
 
     // Initial render
+    applyTheme(state.theme);
+    initChartTooltips();
     render();
+    // Numbers measured before the mono web-font loads can mis-size; re-fit once ready.
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fitText());
 
     // Kick off sync (non-blocking). If unconfigured this is a no-op aside from
     // setting indicator status. If configured, pulls the gist, decrypts, and
