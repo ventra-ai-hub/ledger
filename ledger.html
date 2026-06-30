@@ -1301,7 +1301,11 @@
       const af = autofocus ? ' autofocus' : '';
       const ph = placeholder ? ` placeholder="${attr(placeholder)}"` : '';
       const v = value == null ? '' : value;
-      return `<input${idAttr}${fieldAttr} type="${attr(type)}" value="${attr(v)}"${ph}${af}
+      // Passphrase fields must not be mangled by mobile keyboards — a single
+      // auto-capital or autocorrect turns the passphrase into one that no
+      // longer decrypts the gist, which is the usual "sync stopped working".
+      const secure = type === 'password' ? ' autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"' : '';
+      return `<input${idAttr}${fieldAttr} type="${attr(type)}" value="${attr(v)}"${ph}${af}${secure}
         class="w-full px-4 py-2.5 text-sm bg-white rounded-2xl text-stone-900 placeholder:text-stone-400 focus:outline-none transition-all ${className}"
         style="${shadowField}" />`;
     }
@@ -2356,7 +2360,7 @@
     function incomeChartsBlock() {
       const h = isNarrowViewport() ? '240px' : '300px';
       const monthsBack = state.period === 'month' ? 6 : 12;
-      const catWord = state.period === 'month' ? 'This month' : state.period === 'quarter' ? 'This quarter' : 'This FY';
+      const catWord = state.period === 'month' ? 'Last 3 months' : state.period === 'quarter' ? 'This quarter' : 'This FY';
       return card(`
         <div class="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div>
@@ -4969,8 +4973,20 @@
       // Income by category — top 5 categories of positive income in active period.
       'income-category': (canvas) => {
         const cur = state.data.settings.currency;
+        // Month mode uses a rolling 3-month window so the mix breathes as
+        // setup fees and usage roll through (subscriptions otherwise dominate).
+        const monthWindow = (() => {
+          if (state.period !== 'month') return null;
+          const [wy, wm] = state.currentMonth.split('-').map(Number);
+          const keys = new Set();
+          for (let i = 2; i >= 0; i--) {
+            const d = new Date(wy, wm - 1 - i, 1);
+            keys.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+          }
+          return keys;
+        })();
         const inP = (iso) => {
-          if (state.period === 'month')   return monthKey(iso) === state.currentMonth;
+          if (state.period === 'month')   return monthWindow.has(monthKey(iso));
           if (state.period === 'quarter') return isoInQuarter(iso, state.currentQuarter);
           return isoInFY(iso, state.currentFY);
         };
@@ -4993,7 +5009,7 @@
         const srHost = document.getElementById(canvas.dataset.srTarget);
         if (srHost) {
           srHost.innerHTML = srSummaryTable(canvas.id + '-tbl',
-            `Income by category ${state.period === 'month' ? 'this month' : 'this ' + state.period}`,
+            `Income by category ${state.period === 'month' ? 'over the last 3 months' : 'this ' + state.period}`,
             ['Category', 'Total', '% of income'],
             data.map((v, i) => [labels[i], fmt(v, cur), `${((v / total) * 100).toFixed(1)}%`])
           );
